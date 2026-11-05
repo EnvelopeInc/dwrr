@@ -1,4 +1,4 @@
-module github.com/Channel-3-Eugene/dwrr
+module github.com/EnvelopeInc/dwrr
 
 go 1.22.2
 

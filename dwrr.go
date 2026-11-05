@@ -1,20 +1,21 @@
 // Package dwrr implements a Deficit Weighted Round Robin (DWRR) scheduler.
-// It is a generic package that allows scheduling of any type of items (T).
+// Items have uniform cost of one, so service is measured in item counts.
 package dwrr
 
 import "sync"
 
 // DWRR represents a Deficit Weighted Round Robin scheduler for any type.
 type DWRR[T any] struct {
-	quantums []uint     // Array of quantums, each representing the weight of a queue.
+	quantums []uint     // Configured item-count service quantum for each queue.
+	deficits []uint     // Unused item-count service credit carried between rounds.
 	queues   [][]T      // Array of queues, where each queue holds items of type T.
-	maxTake  uint       // Maximum number of items allowed to take from each queue in one cycle.
-	mu       sync.Mutex // Mutex to ensure that access to the queues and quantums is thread-safe.
+	maxTake  uint       // Maximum number of items allowed to take from each queue in one round.
+	mu       sync.Mutex // Mutex protecting all scheduler state.
 }
 
-// NewDWRR creates a new DWRR scheduler with a specified number of queues and a maxTake limit.
-// `count` specifies the number of queues.
-// `maxTake` is the maximum number of items that can be processed from each queue per operation cycle.
+// NewDWRR creates a DWRR scheduler with count queues and a per-queue maxTake limit.
+// Each queue starts with an item-count quantum of 1. A maxTake of 0 prevents
+// Do from emitting items; otherwise it caps each queue's output per round.
 func NewDWRR[T any](count uint, maxTake uint) *DWRR[T] {
 	quantums := make([]uint, count)
 	for i := range quantums {
@@ -22,23 +23,24 @@ func NewDWRR[T any](count uint, maxTake uint) *DWRR[T] {
 	}
 	return &DWRR[T]{
 		quantums: quantums,
+		deficits: make([]uint, count),
 		queues:   make([][]T, count),
 		maxTake:  maxTake,
 	}
 }
 
-// AddQueue appends a new queue to the scheduler.
-// Initially, this queue will be empty and have a quantum of 0.
+// AddQueue appends a new empty queue with the default item-count quantum of 1.
 func (dwrr *DWRR[T]) AddQueue() {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
 
 	dwrr.queues = append(dwrr.queues, nil)
-	dwrr.quantums = append(dwrr.quantums, 0)
+	dwrr.quantums = append(dwrr.quantums, 1)
+	dwrr.deficits = append(dwrr.deficits, 0)
 }
 
-// RemoveQueue removes the last queue from the scheduler.
-// If there are no queues, the function does nothing.
+// RemoveQueue removes the last queue from the scheduler. If there are no queues,
+// the function does nothing.
 func (dwrr *DWRR[T]) RemoveQueue() {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -47,26 +49,35 @@ func (dwrr *DWRR[T]) RemoveQueue() {
 		return
 	}
 
-	dwrr.queues = dwrr.queues[:len(dwrr.queues)-1]
-	dwrr.quantums = dwrr.quantums[:len(dwrr.quantums)-1]
+	last := len(dwrr.queues) - 1
+	dwrr.queues[last] = nil
+	dwrr.queues = dwrr.queues[:last]
+	dwrr.quantums = dwrr.quantums[:last]
+	dwrr.deficits = dwrr.deficits[:last]
 }
 
-// Enqueue adds items to a specific queue.
-// `queue` is the index of the queue to which items are added.
-// `items` is a slice of items of type T to be added to the queue.
-// The quantum for the queue is updated to reflect the new queue length.
+// SetQuantum sets a queue's item-count service quantum, discarding any
+// accumulated deficit. A zero quantum leaves the queue without service from Do
+// until its quantum is changed. Invalid queue indices panic, like the other
+// indexed queue operations.
+func (dwrr *DWRR[T]) SetQuantum(queue uint, quantum uint) {
+	dwrr.mu.Lock()
+	defer dwrr.mu.Unlock()
+
+	dwrr.quantums[queue] = quantum
+	dwrr.deficits[queue] = 0
+}
+
+// Enqueue adds items to a specific queue. The queue's quantum is unchanged.
 func (dwrr *DWRR[T]) Enqueue(queue uint, items []T) {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
 
 	dwrr.queues[queue] = append(dwrr.queues[queue], items...)
-	dwrr.quantums[queue] = uint(len(dwrr.queues[queue]))
 }
 
-// Dequeue removes and returns the first item from a specified queue.
-// `queue` is the index of the queue from which the item is removed.
-// If the queue is empty, it returns nil.
-// The quantum for the queue is decremented by one.
+// Dequeue removes and returns the first item from a specified queue. If the
+// queue is empty, it returns nil. Removing the final item resets its deficit.
 func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -77,28 +88,31 @@ func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
 
 	item := dwrr.queues[queue][0]
 	dwrr.queues[queue] = dwrr.queues[queue][1:]
-	dwrr.quantums[queue]--
+	if len(dwrr.queues[queue]) == 0 {
+		dwrr.deficits[queue] = 0
+	}
 
 	return &item
 }
 
-// DequeueAll removes and returns all items from a specified queue.
-// `queue` is the index of the queue from which items are removed.
-// This operation resets the queue and its corresponding quantum to zero.
+// DequeueAll removes and returns all items from a specified queue and resets
+// its deficit to zero.
 func (dwrr *DWRR[T]) DequeueAll(queue uint) []T {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
 
 	items := dwrr.queues[queue]
 	dwrr.queues[queue] = nil
-	dwrr.quantums[queue] = 0
+	dwrr.deficits[queue] = 0
 
 	return items
 }
 
-// Do processes each queue based on its quantum and the maxTake limit.
-// It returns a slice of slices, each containing the items taken from the respective queue.
-// This method ensures that no queue is allowed to take more than its quantum or the maxTake limit.
+// Do performs one round, visiting each queue once in index order. Each non-empty
+// queue receives its configured item-count quantum, capped at its current backlog;
+// it emits up to its deficit and maxTake. Unused deficit carries over while the
+// queue remains non-empty and resets when it empties. Items have uniform cost 1,
+// so quantum weights service by item count, not by item size or another cost.
 func (dwrr *DWRR[T]) Do() [][]T {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -107,32 +121,36 @@ func (dwrr *DWRR[T]) Do() [][]T {
 
 	for i, queue := range dwrr.queues {
 		if len(queue) == 0 {
-			dwrr.quantums[i] = 1
+			dwrr.deficits[i] = 0
 			continue
 		}
 
-		split := dwrr.quantums[i]
-
 		qlen := uint(len(queue))
-		if split > qlen {
-			split = qlen
+		// Saturate at backlog without overflowing, and discard credit made
+		// excessive by direct dequeue operations.
+		if dwrr.deficits[i] >= qlen || dwrr.quantums[i] >= qlen-dwrr.deficits[i] {
+			dwrr.deficits[i] = qlen
+		} else {
+			dwrr.deficits[i] += dwrr.quantums[i]
 		}
 
+		split := dwrr.deficits[i]
 		if split > dwrr.maxTake {
 			split = dwrr.maxTake
 		}
 
-		// Pre-allocate memory for take[i] slice
+		if split == 0 {
+			continue
+		}
 		take[i] = make([]T, split)
 		copy(take[i], queue[:split])
-
-		// Reuse queue slice by copying the remaining elements
 		copy(queue, queue[split:])
-
-		// Trim queue slice
+		clear(queue[qlen-split:])
 		dwrr.queues[i] = queue[:qlen-split]
-
-		dwrr.quantums[i] = qlen - split
+		dwrr.deficits[i] -= split
+		if len(dwrr.queues[i]) == 0 {
+			dwrr.deficits[i] = 0
+		}
 	}
 
 	return take
