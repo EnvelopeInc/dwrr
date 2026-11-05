@@ -5,6 +5,7 @@ package dwrr
 import "sync"
 
 // DWRR represents a Deficit Weighted Round Robin scheduler for any type.
+// Each item has uniform cost one, and all methods are safe for concurrent use.
 type DWRR[T any] struct {
 	quantums []uint     // Configured item-count service quantum for each queue.
 	deficits []uint     // Unused item-count service credit carried between rounds.
@@ -30,6 +31,7 @@ func NewDWRR[T any](count uint, maxTake uint) *DWRR[T] {
 }
 
 // AddQueue appends a new empty queue with the default item-count quantum of 1.
+// Existing queues retain their indices and scheduling state.
 func (dwrr *DWRR[T]) AddQueue() {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -40,7 +42,8 @@ func (dwrr *DWRR[T]) AddQueue() {
 }
 
 // RemoveQueue removes the last queue from the scheduler. If there are no queues,
-// the function does nothing.
+// the function does nothing. It does not change the indices or state of the
+// remaining queues.
 func (dwrr *DWRR[T]) RemoveQueue() {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -68,7 +71,8 @@ func (dwrr *DWRR[T]) SetQuantum(queue uint, quantum uint) {
 	dwrr.deficits[queue] = 0
 }
 
-// Enqueue adds items to a specific queue. The queue's quantum is unchanged.
+// Enqueue adds items to a specific queue in FIFO order. The queue's quantum and
+// existing deficit are unchanged. An invalid queue index panics.
 func (dwrr *DWRR[T]) Enqueue(queue uint, items []T) {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -78,6 +82,7 @@ func (dwrr *DWRR[T]) Enqueue(queue uint, items []T) {
 
 // Dequeue removes and returns the first item from a specified queue. If the
 // queue is empty, it returns nil. Removing the final item resets its deficit.
+// An invalid queue index panics.
 func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
@@ -96,7 +101,7 @@ func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
 }
 
 // DequeueAll removes and returns all items from a specified queue and resets
-// its deficit to zero.
+// its deficit to zero. An invalid queue index panics.
 func (dwrr *DWRR[T]) DequeueAll(queue uint) []T {
 	dwrr.mu.Lock()
 	defer dwrr.mu.Unlock()
