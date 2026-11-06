@@ -28,7 +28,7 @@ func main() {
 }
 ```
 
-`AddQueue` appends an empty queue with quantum 1. `RemoveQueue` removes the last queue and does nothing if there are no queues. `Enqueue` appends items to one queue without changing its quantum. `Dequeue` removes and returns the first item (or `nil` if empty), resetting deficit if it empties the queue; `DequeueAll` returns all queued items and resets deficit. All indexed queue operations panic for an invalid index, consistent with Go slice indexing. Scheduler operations are mutex-protected.
+`AddQueue` appends an empty queue with quantum 1. `RemoveQueue` removes the last queue and does nothing if there are no queues. `Enqueue` appends items to one queue without changing its quantum. `Dequeue` removes and returns the first item (or `nil` if empty), resetting deficit if it empties the queue; `DequeueAll` returns all queued items and resets deficit. All indexed queue operations panic for an invalid index, consistent with Go slice indexing. Scheduler operations are mutex-protected; a `DWRR` must not be copied after first use.
 
 This is a count-based scheduler, not a byte- or cost-aware scheduler: every item consumes one unit regardless of its size or processing cost. Deficit is retained only while a queue remains non-empty; emptying it through `Do`, `Dequeue`, or `DequeueAll` clears that credit. Setting a quantum, including setting it to zero, also clears the queue's accumulated deficit. Changing queue count only appends or removes the last queue; it does not reorder existing queues.
 

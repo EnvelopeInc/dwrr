@@ -1,6 +1,7 @@
 package dwrr
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,6 +58,19 @@ func TestEnqueueDequeue(t *testing.T) {
 	item = dwrr.Dequeue(0)
 	assert.Nil(t, item)
 	assert.Zero(t, dwrr.deficits[0])
+}
+
+func TestDequeueClearsRemovedItem(t *testing.T) {
+	value := 42
+	dwrr := NewDWRR[*int](1, 1)
+	dwrr.Enqueue(0, []*int{&value})
+	backing := dwrr.queues[0]
+
+	item := dwrr.Dequeue(0)
+
+	assert.NotNil(t, item)
+	assert.Equal(t, &value, *item)
+	assert.Nil(t, backing[0])
 }
 
 func TestDequeueAll(t *testing.T) {
@@ -138,4 +152,128 @@ func TestZeroMaxTake(t *testing.T) {
 	dwrr.Enqueue(0, []int{1, 2})
 	assert.Equal(t, [][]int{nil}, dwrr.Do())
 	assert.Equal(t, []int{1, 2}, dwrr.queues[0])
+}
+
+func TestConcurrentOperationsConserveItems(t *testing.T) {
+	const queueCount = 4
+	const itemsPerQueue = 300
+	dwrr := NewDWRR[int](queueCount, 5)
+	start := make(chan struct{})
+
+	var collectedMu sync.Mutex
+	collected := make([]int, 0, queueCount*itemsPerQueue)
+	collect := func(items []int) {
+		collectedMu.Lock()
+		collected = append(collected, items...)
+		collectedMu.Unlock()
+	}
+	collectRound := func(round [][]int) {
+		for _, items := range round {
+			collect(items)
+		}
+	}
+
+	var producers sync.WaitGroup
+	for queue := 0; queue < queueCount; queue++ {
+		producers.Add(1)
+		go func(queue int) {
+			defer producers.Done()
+			<-start
+			for item := 0; item < itemsPerQueue; item++ {
+				id := queue*itemsPerQueue + item
+				dwrr.Enqueue(uint(queue), []int{id})
+				if item%7 == 0 {
+					dwrr.SetQuantum(uint(queue), uint(item%5+1))
+				}
+			}
+		}(queue)
+	}
+	producersDone := make(chan struct{})
+
+	var consumers sync.WaitGroup
+	consumers.Add(1)
+	go func() {
+		defer consumers.Done()
+		<-start
+		for {
+			select {
+			case <-producersDone:
+				return
+			default:
+				collectRound(dwrr.Do())
+			}
+		}
+	}()
+	for queue := 0; queue < queueCount; queue++ {
+		consumers.Add(2)
+		go func(queue int) {
+			defer consumers.Done()
+			<-start
+			for {
+				select {
+				case <-producersDone:
+					return
+				default:
+					if item := dwrr.Dequeue(uint(queue)); item != nil {
+						collect([]int{*item})
+					}
+				}
+			}
+		}(queue)
+		go func(queue int) {
+			defer consumers.Done()
+			<-start
+			for i := 0; i < itemsPerQueue; i++ {
+				collect(dwrr.DequeueAll(uint(queue)))
+			}
+		}(queue)
+	}
+	close(start)
+	producers.Wait()
+	close(producersDone)
+	consumers.Wait()
+
+	// Once concurrent producers and removers have stopped, drain any remaining
+	// backlog through both public bulk and round operations.
+	for queue := 0; queue < queueCount; queue++ {
+		collect(dwrr.DequeueAll(uint(queue)))
+	}
+	collectRound(dwrr.Do())
+
+	assert.Len(t, collected, queueCount*itemsPerQueue)
+	seen := make(map[int]bool, len(collected))
+	for _, item := range collected {
+		if assert.False(t, seen[item], "item %d was returned more than once", item) {
+			seen[item] = true
+		}
+	}
+	for item := 0; item < queueCount*itemsPerQueue; item++ {
+		assert.True(t, seen[item], "item %d was not returned", item)
+	}
+}
+
+func TestConcurrentStructuralQueueOperations(t *testing.T) {
+	const workers = 8
+	const iterations = 500
+	dwrr := NewDWRR[int](2, 1)
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				dwrr.AddQueue()
+				dwrr.Do()
+				dwrr.RemoveQueue()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Do is the public, lock-protected way to observe the final queue count.
+	assert.Len(t, dwrr.Do(), 2)
 }

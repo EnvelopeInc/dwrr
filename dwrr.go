@@ -6,6 +6,7 @@ import "sync"
 
 // DWRR represents a Deficit Weighted Round Robin scheduler for any type.
 // Each item has uniform cost one, and all methods are safe for concurrent use.
+// A DWRR must not be copied after first use.
 type DWRR[T any] struct {
 	quantums []uint     // Configured item-count service quantum for each queue.
 	deficits []uint     // Unused item-count service credit carried between rounds.
@@ -92,6 +93,7 @@ func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
 	}
 
 	item := dwrr.queues[queue][0]
+	clear(dwrr.queues[queue][:1])
 	dwrr.queues[queue] = dwrr.queues[queue][1:]
 	if len(dwrr.queues[queue]) == 0 {
 		dwrr.deficits[queue] = 0
