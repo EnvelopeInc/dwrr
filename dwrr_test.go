@@ -154,6 +154,37 @@ func TestZeroMaxTake(t *testing.T) {
 	assert.Equal(t, []int{1, 2}, dwrr.queues[0])
 }
 
+func TestMaxQuantumSaturatesAtBacklog(t *testing.T) {
+	dwrr := NewDWRR[int](1, 1)
+	dwrr.SetQuantum(0, ^uint(0))
+	dwrr.Enqueue(0, []int{1, 2, 3})
+
+	assert.Equal(t, [][]int{{1}}, dwrr.Do())
+	assert.Equal(t, uint(2), dwrr.deficits[0])
+	assert.Equal(t, [][]int{{2}}, dwrr.Do())
+	assert.Equal(t, uint(1), dwrr.deficits[0])
+	assert.Equal(t, [][]int{{3}}, dwrr.Do())
+	assert.Zero(t, dwrr.deficits[0])
+}
+
+func TestIndexedOperationsPanicOnInvalidQueue(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*DWRR[int])
+	}{
+		{name: "SetQuantum", call: func(dwrr *DWRR[int]) { dwrr.SetQuantum(1, 1) }},
+		{name: "Enqueue", call: func(dwrr *DWRR[int]) { dwrr.Enqueue(1, []int{1}) }},
+		{name: "Dequeue", call: func(dwrr *DWRR[int]) { dwrr.Dequeue(1) }},
+		{name: "DequeueAll", call: func(dwrr *DWRR[int]) { dwrr.DequeueAll(1) }},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			assert.Panics(t, func() { operation.call(NewDWRR[int](1, 1)) })
+		})
+	}
+}
+
 func TestConcurrentOperationsConserveItems(t *testing.T) {
 	const queueCount = 4
 	const itemsPerQueue = 300
