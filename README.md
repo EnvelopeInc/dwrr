@@ -1,14 +1,14 @@
 # dwrr
 
-`github.com/EnvelopeInc/dwrr` is a generic Deficit Weighted Round Robin scheduler for FIFO queues. It assigns uniform cost to each item and schedules by item count; it is not byte-aware or configurable for application-specific item costs.
-
-Requires Go 1.22.2 or newer.
+`github.com/EnvelopeInc/dwrr` is a generic cost-aware Deficit Weighted Round Robin scheduler for FIFO queues. Requires Go 1.22.2 or newer.
 
 ## Install
 
 ```sh
 go get github.com/EnvelopeInc/dwrr@v0.9.0
 ```
+
+The published `v0.9.0` still uses the earlier unit-cost `Do` API; the cost-aware `Take` API below is unreleased development code.
 
 ## Example
 
@@ -22,38 +22,47 @@ import (
 )
 
 func main() {
-	s := dwrr.NewDWRR[string](2, 2)
-	s.SetQuantum(1, 2)
-	s.Enqueue(0, []string{"first"})
-	s.Enqueue(1, []string{"second", "third"})
-	fmt.Println(s.Do()) // one output slice per queue, in index order
+	s := dwrr.NewDWRR[string](2)
+	if err := s.SetQuantum(0, 2); err != nil {
+		panic(err)
+	}
+	if err := s.SetQuantum(1, 3); err != nil {
+		panic(err)
+	}
+	if err := s.Enqueue(0, []dwrr.Item[string]{{Value: "a", Cost: 2}, {Value: "b", Cost: 2}}); err != nil {
+		panic(err)
+	}
+	if err := s.Enqueue(1, []dwrr.Item[string]{{Value: "x", Cost: 4}, {Value: "y", Cost: 1}}); err != nil {
+		panic(err)
+	}
+
+	fmt.Println(s.Take(1)) // [{0 a 2}]; queue 0's visit remains active
+	fmt.Println(s.Take(1)) // [{0 b 2}]; queue 1 gets its first quantum and blocks at cost 4
+	fmt.Println(s.Take(1)) // [{1 x 4}]; queue 1 accumulated enough deficit
+	fmt.Println(s.Take(1)) // [{1 y 1}]
 }
 ```
 
-## Scheduling and queue operations
+(The result formatting above is illustrative; the `Scheduled` fields are `Queue`, `Value`, and `Cost`.)
 
-`NewDWRR(count, maxTake)` creates `count` queues, each with quantum 1. `Do()` makes one round, visiting queues once in index order. For each non-empty queue, it adds the configured quantum to its deficit, saturating at the current backlog, then emits up to `min(deficit, maxTake)` items. It returns a `[][]T` with one entry per queue in index order; queues with no output have a nil entry. Unused deficit carries over while items remain and resets when the queue empties. A zero quantum provides no service until changed. `maxTake` is a per-queue, per-round item cap; zero means no items are emitted. A cap can limit or delay service implied by a quantum. Quantum and deficit count items only, regardless of size or processing cost.
+## Scheduling
 
-- `SetQuantum(index, quantum)` changes the count-based quantum and clears that queue's deficit.
-- `Enqueue(index, items)` appends items in FIFO order without changing quantum or deficit.
-- `Dequeue(index)` removes the FIFO head and returns a pointer to a copy of the item, or `nil` if empty. Removing the last item clears deficit.
-- `DequeueAll(index)` returns all items and clears the queue and its deficit.
-- `AddQueue()` appends an empty queue with quantum 1.
-- `RemoveQueue()` removes the last queue and discards its contents; with no queues it does nothing. Other queue indices do not change.
+`NewDWRR[T](count)` creates `count` queues, each with quantum 1. The zero value is unsupported; use the constructor. `Item[T]` has a `Value` and a positive `Cost`; `Scheduled[T]` reports the source queue, value, and cost. `SetQuantum(queue, quantum)` configures a positive quantum and returns `ErrZeroQuantum` for zero. `Enqueue` returns `ErrZeroCost` if any item has zero cost and validates the full input before changing the queue. It copies each item record, so an accepted cost cannot change if the caller later modifies its input slice; values of type `T` are shallow-copied. Invalid queue indices panic as slice indexing does.
 
-All indexed operations panic on an invalid index, consistent with slice indexing. Coordinate queue removal with operations using that index: a concurrently removed index may become invalid. Scheduler methods synchronize internal state, but do not make mutable values stored in `T` safe for concurrent access. Do not copy a `DWRR` after first use.
+The scheduler visits queues cyclically. At the start of a visit it adds that queue's quantum to its deficit, then serves affordable FIFO heads consecutively, subtracting each cost. An unaffordable head blocks later items and ends that visit. Unused deficit carries forward while the queue remains nonempty: this is what lets costs larger than one quantum eventually become eligible. Empty queues reset their deficit. A `Take` limit is only a retrieval limit, not a fairness cap: if it interrupts a visit, that visit and its remaining deficit persist, and the next call continues without awarding another quantum. Output is item-by-item in scheduler service order; queue identity remains in each result.
 
-## Limitations
+`Take(n)` returns up to n scheduled items in service order; it returns fewer only after the queued work is exhausted. It returns a nonnil empty slice for n=0, no queues, or no available work; negative n panics. `Take(0)` does not change scheduling state. The result is not preallocated from n, and its slice storage does not alias internal queues. Internal visits may process several items and cross multiple queue rounds in one call. A retrieval limit never ends a visit or caps a queue's fairness share.
 
-This scheduler does not account for bytes, size, runtime, or any cost other than one item. `maxTake` limits a queue's output even when its accumulated deficit is larger. Queue management only appends or removes the last queue; there is no arbitrary insertion, removal, or reordering.
+Deficit uses exact arbitrary-precision nonnegative arithmetic. A visit can temporarily accumulate more credit than `uint64` can represent, especially when `Take(n)` pauses it, so credits are not saturated. Individual costs and quantums remain `uint64`. Once a complete cycle produces no item, the scheduler uses exact division to skip only whole unproductive cycles, crediting every nonempty queue equally before resuming visits in order.
 
-## Contributing
+## Queue operations and mutation semantics
 
-Format Go changes with `gofmt`. Before opening a pull request, run:
+All methods synchronize scheduler state; do not copy a `DWRR` after first use. `Take` selects and removes work; the caller owns downstream execution and its concurrency.
 
-```sh
-go test -race ./...
-go vet ./...
-```
+- `Enqueue` appends FIFO items. Appending to the active queue joins that same visit at its tail without another quantum.
+- `SetQuantum` clears that queue's deficit and cancels its active visit, if any; the new quantum is granted at its next visit.
+- `Dequeue` returns a pointer to a copy of the FIFO head, or nil when empty. If items remain, it preserves deficit and the active visit; if it empties the queue, it resets deficit and closes that visit. `DequeueAll` clears the queue, resets deficit, and cancels its active visit.
+- `AddQueue` appends an empty queue at quantum 1. Existing indices and an active visit remain unchanged.
+- `RemoveQueue` drops the last queue and its contents; removing the active queue closes its visit. Other indices remain unchanged and the cursor stays valid. Removing from no queues is a no-op.
 
-Pull requests should explain the user-visible change, include focused tests for behavior changes, and report relevant validation. Keep docs and tests consistent with the count-based scheduling semantics. CI runs the race tests and vet on Go 1.22.x and the current stable Go version.
+Cost fairness is fairness over application-declared costs, not execution time, bytes, or wall-clock resource use. Synchronization protects scheduler state, not concurrent mutation of values stored in `T`.

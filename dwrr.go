@@ -1,164 +1,294 @@
-// Package dwrr implements a Deficit Weighted Round Robin (DWRR) scheduler.
-// Items have uniform cost of one, so service is measured in item counts.
+// Package dwrr implements a cost-aware Deficit Weighted Round Robin scheduler.
+// Quantum and item costs are positive uint64 values. Scheduling order is
+// determined by queue visits and FIFO heads, not by downstream execution time.
 package dwrr
 
-import "sync"
+import (
+	"errors"
+	"math/big"
+	"sync"
+)
 
-// DWRR represents a Deficit Weighted Round Robin scheduler for any type.
-// Each item has uniform cost one, and all methods are safe for concurrent use.
-// A DWRR must not be copied after first use.
+var (
+	// ErrZeroQuantum is returned when SetQuantum is given a zero quantum.
+	ErrZeroQuantum = errors.New("dwrr: quantum must be positive")
+	// ErrZeroCost is returned when Enqueue receives an item with zero cost.
+	ErrZeroCost = errors.New("dwrr: item cost must be positive")
+)
+
+// Item is a payload and its positive scheduling cost. Enqueue copies the item
+// record, so later changes to the caller's Cost do not affect scheduling.
+type Item[T any] struct {
+	Value T      // Payload returned by Take.
+	Cost  uint64 // Positive scheduling cost, fixed when Enqueue succeeds.
+}
+
+// Scheduled is an item selected from Queue in scheduler service order.
+type Scheduled[T any] struct {
+	Queue uint   // Index of the source queue.
+	Value T      // Scheduled payload.
+	Cost  uint64 // The item's declared scheduling cost.
+}
+
+// DWRR is a concurrent-safe cost-aware deficit round-robin scheduler. Do not
+// copy it after first use. Its zero value is unusable; use NewDWRR.
 type DWRR[T any] struct {
-	quantums []uint     // Configured item-count service quantum for each queue.
-	deficits []uint     // Unused item-count service credit carried between rounds.
-	queues   [][]T      // Array of queues, where each queue holds items of type T.
-	maxTake  uint       // Maximum number of items allowed to take from each queue in one round.
-	mu       sync.Mutex // Mutex protecting all scheduler state.
+	mu       sync.Mutex
+	queues   [][]Item[T]
+	quantums []uint64
+	deficits []*big.Int // Exact nonnegative credits; never limited to uint64.
+	cursor   int        // Next queue when idle; current queue while a visit is active.
+	active   bool       // Whether the current cursor visit has already received quantum.
 }
 
-// NewDWRR creates a DWRR scheduler with count queues and a per-queue maxTake limit.
-// Each queue starts with an item-count quantum of 1. A maxTake of 0 prevents
-// Do from emitting items; otherwise it caps each queue's output per round.
-func NewDWRR[T any](count uint, maxTake uint) *DWRR[T] {
-	quantums := make([]uint, count)
-	for i := range quantums {
-		quantums[i] = 1
+// NewDWRR creates count empty queues, each with quantum 1.
+func NewDWRR[T any](count uint) *DWRR[T] {
+	n := int(count)
+	d := &DWRR[T]{queues: make([][]Item[T], n), quantums: make([]uint64, n), deficits: make([]*big.Int, n)}
+	for i := range d.quantums {
+		d.quantums[i] = 1
+		d.deficits[i] = new(big.Int)
 	}
-	return &DWRR[T]{
-		quantums: quantums,
-		deficits: make([]uint, count),
-		queues:   make([][]T, count),
-		maxTake:  maxTake,
+	return d
+}
+
+// SetQuantum changes a queue's quantum, clears its deficit and cancels its
+// active visit. The new quantum is granted at that queue's next visit.
+// Zero quantum returns ErrZeroQuantum without changing state. Invalid indices panic.
+func (d *DWRR[T]) SetQuantum(queue uint, quantum uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	configuredQuantum := &d.quantums[queue] // Preserve slice-index panic behavior.
+	if quantum == 0 {
+		return ErrZeroQuantum
 	}
+	*configuredQuantum = quantum
+	d.deficits[queue].SetUint64(0)
+	if d.active && d.cursor == int(queue) {
+		d.active = false
+		d.cursor = (d.cursor + 1) % len(d.queues)
+	}
+	return nil
 }
 
-// AddQueue appends a new empty queue with the default item-count quantum of 1.
-// Existing queues retain their indices and scheduling state.
-func (dwrr *DWRR[T]) AddQueue() {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	dwrr.queues = append(dwrr.queues, nil)
-	dwrr.quantums = append(dwrr.quantums, 1)
-	dwrr.deficits = append(dwrr.deficits, 0)
+// Enqueue validates the complete input before appending it atomically. New
+// items join an active visit at the queue tail. Item records, including costs,
+// are copied; values of T are shallow-copied. Zero cost returns ErrZeroCost.
+// Invalid queue indices panic.
+func (d *DWRR[T]) Enqueue(queue uint, items []Item[T]) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	queueItems := &d.queues[queue] // Preserve slice-index panic behavior.
+	for _, item := range items {
+		if item.Cost == 0 {
+			return ErrZeroCost
+		}
+	}
+	*queueItems = append(*queueItems, items...)
+	return nil
 }
 
-// RemoveQueue removes the last queue from the scheduler. If there are no queues,
-// the function does nothing. It does not change the indices or state of the
-// remaining queues.
-func (dwrr *DWRR[T]) RemoveQueue() {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
+// AddQueue appends an empty queue with quantum 1.
+func (d *DWRR[T]) AddQueue() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.queues = append(d.queues, nil)
+	d.quantums = append(d.quantums, 1)
+	d.deficits = append(d.deficits, new(big.Int))
+}
 
-	if len(dwrr.queues) == 0 {
+// RemoveQueue removes the last queue and its contents. Existing queue indices
+// remain stable. Removing the active queue cancels that visit; cursor is kept
+// in range (or reset to zero when no queues remain). Empty removal is a no-op.
+func (d *DWRR[T]) RemoveQueue() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := len(d.queues)
+	if n == 0 {
 		return
 	}
-
-	last := len(dwrr.queues) - 1
-	dwrr.queues[last] = nil
-	dwrr.queues = dwrr.queues[:last]
-	dwrr.quantums = dwrr.quantums[:last]
-	dwrr.deficits = dwrr.deficits[:last]
+	last := n - 1
+	if d.active && d.cursor == last {
+		d.active = false
+		d.cursor = 0
+	}
+	d.queues[last] = nil
+	d.deficits[last] = nil
+	d.queues = d.queues[:last]
+	d.quantums = d.quantums[:last]
+	d.deficits = d.deficits[:last]
+	if last == 0 {
+		d.cursor = 0
+	} else if d.cursor >= last {
+		d.cursor %= last
+	}
 }
 
-// SetQuantum sets a queue's item-count service quantum, discarding any
-// accumulated deficit. A zero quantum leaves the queue without service from Do
-// until its quantum is changed. Invalid queue indices panic, like the other
-// indexed queue operations.
-func (dwrr *DWRR[T]) SetQuantum(queue uint, quantum uint) {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	dwrr.quantums[queue] = quantum
-	dwrr.deficits[queue] = 0
-}
-
-// Enqueue adds items to a specific queue in FIFO order. The queue's quantum and
-// existing deficit are unchanged. An invalid queue index panics.
-func (dwrr *DWRR[T]) Enqueue(queue uint, items []T) {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	dwrr.queues[queue] = append(dwrr.queues[queue], items...)
-}
-
-// Dequeue removes and returns the first item from a specified queue. If the
-// queue is empty, it returns nil. Removing the final item resets its deficit.
-// An invalid queue index panics.
-func (dwrr *DWRR[T]) Dequeue(queue uint) *T {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	if len(dwrr.queues[queue]) == 0 {
+// Dequeue removes and returns a copy of the FIFO head, or nil when empty. If
+// it empties the queue, deficit is reset and an active visit is canceled. If
+// items remain, deficit and active-visit state are preserved.
+func (d *DWRR[T]) Dequeue(queue uint) *Item[T] {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	q := int(queue)
+	if len(d.queues[q]) == 0 {
 		return nil
 	}
-
-	item := dwrr.queues[queue][0]
-	clear(dwrr.queues[queue][:1])
-	dwrr.queues[queue] = dwrr.queues[queue][1:]
-	if len(dwrr.queues[queue]) == 0 {
-		dwrr.deficits[queue] = 0
+	item := d.queues[q][0]
+	clear(d.queues[q][:1])
+	d.queues[q] = d.queues[q][1:]
+	if len(d.queues[q]) == 0 {
+		d.deficits[q].SetUint64(0)
+		if d.active && d.cursor == q {
+			d.active = false
+			d.cursor = (d.cursor + 1) % len(d.queues)
+		}
 	}
-
 	return &item
 }
 
-// DequeueAll removes and returns all items from a specified queue and resets
-// its deficit to zero. An invalid queue index panics.
-func (dwrr *DWRR[T]) DequeueAll(queue uint) []T {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	items := dwrr.queues[queue]
-	dwrr.queues[queue] = nil
-	dwrr.deficits[queue] = 0
-
+// DequeueAll removes and returns every queued item and resets deficit. If this
+// queue is active, its visit is canceled. Invalid indices panic.
+func (d *DWRR[T]) DequeueAll(queue uint) []Item[T] {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	q := int(queue)
+	items := d.queues[q]
+	d.queues[q] = nil
+	d.deficits[q].SetUint64(0)
+	if d.active && d.cursor == q {
+		d.active = false
+		d.cursor = (d.cursor + 1) % len(d.queues)
+	}
 	return items
 }
 
-// Do performs one round, visiting each queue once in index order. Each non-empty
-// queue receives its configured item-count quantum, capped at its current backlog;
-// it emits up to its deficit and maxTake. Unused deficit carries over while the
-// queue remains non-empty and resets when it empties. Items have uniform cost 1,
-// so quantum weights service by item count, not by item size or another cost.
-func (dwrr *DWRR[T]) Do() [][]T {
-	dwrr.mu.Lock()
-	defer dwrr.mu.Unlock()
-
-	take := make([][]T, len(dwrr.queues))
-
-	for i, queue := range dwrr.queues {
-		if len(queue) == 0 {
-			dwrr.deficits[i] = 0
-			continue
-		}
-
-		qlen := uint(len(queue))
-		// Saturate at backlog without overflowing, and discard credit made
-		// excessive by direct dequeue operations.
-		if dwrr.deficits[i] >= qlen || dwrr.quantums[i] >= qlen-dwrr.deficits[i] {
-			dwrr.deficits[i] = qlen
-		} else {
-			dwrr.deficits[i] += dwrr.quantums[i]
-		}
-
-		split := dwrr.deficits[i]
-		if split > dwrr.maxTake {
-			split = dwrr.maxTake
-		}
-
-		if split == 0 {
-			continue
-		}
-		take[i] = make([]T, split)
-		copy(take[i], queue[:split])
-		copy(queue, queue[split:])
-		clear(queue[qlen-split:])
-		dwrr.queues[i] = queue[:qlen-split]
-		dwrr.deficits[i] -= split
-		if len(dwrr.queues[i]) == 0 {
-			dwrr.deficits[i] = 0
+// Take returns up to n items in service order. A limit can pause an active
+// visit; its credit and position persist for the next call. Take(0) returns a
+// nonnil empty slice without changing state. Negative n panics. The returned
+// slice is always nonnil and never aliases internal queue storage.
+func (d *DWRR[T]) Take(n int) []Scheduled[T] {
+	if n < 0 {
+		panic("dwrr: negative Take limit")
+	}
+	if n == 0 {
+		return make([]Scheduled[T], 0)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.queues) == 0 {
+		return make([]Scheduled[T], 0)
+	}
+	// Bound result capacity by both the request and queued work. A one-item
+	// result needs at most one append allocation, so avoid scanning queues.
+	capacity := 0
+	if n > 1 {
+		for _, queue := range d.queues {
+			remaining := n - capacity
+			if len(queue) >= remaining {
+				capacity = n
+				break
+			}
+			capacity += len(queue)
 		}
 	}
+	out := make([]Scheduled[T], 0, capacity)
+	// Count new visits since the most recent emitted item. A visit that was
+	// already active at the start of this call must not count as a new visit.
+	visitsSinceService := 0
+	// Reuse arithmetic operands within this locked call rather than allocating
+	// a temporary big.Int for each visit and FIFO head.
+	var scratch big.Int
+	for len(out) < n {
+		if !d.active {
+			if len(d.queues) == 0 {
+				break
+			}
+			q := d.cursor
+			if len(d.queues[q]) == 0 {
+				d.deficits[q].SetUint64(0)
+				d.advance()
+				visitsSinceService++
+			} else {
+				scratch.SetUint64(d.quantums[q])
+				d.deficits[q].Add(d.deficits[q], &scratch)
+				d.active = true
+				visitsSinceService++
+			}
+		} else {
+			q := d.cursor
+			if len(d.queues[q]) == 0 {
+				d.deficits[q].SetUint64(0)
+				d.closeVisit()
+				continue
+			}
+			head := d.queues[q][0]
+			scratch.SetUint64(head.Cost)
+			if d.deficits[q].Cmp(&scratch) < 0 {
+				d.closeVisit()
+			} else {
+				d.deficits[q].Sub(d.deficits[q], &scratch)
+				out = append(out, Scheduled[T]{Queue: uint(q), Value: head.Value, Cost: head.Cost})
+				clear(d.queues[q][:1])
+				d.queues[q] = d.queues[q][1:]
+				if len(d.queues[q]) == 0 {
+					d.deficits[q].SetUint64(0)
+					d.closeVisit()
+				}
+				visitsSinceService = 0
+			}
+		}
+		if !d.active && visitsSinceService >= len(d.queues) {
+			if !d.fastForward() {
+				break
+			}
+			visitsSinceService = 0
+		}
+	}
+	return out
+}
 
-	return take
+func (d *DWRR[T]) advance() { d.cursor = (d.cursor + 1) % len(d.queues) }
+func (d *DWRR[T]) closeVisit() {
+	d.cursor = (d.cursor + 1) % len(d.queues)
+	d.active = false
+}
+
+// fastForward skips complete no-service cycles. Credits use arbitrary-precision
+// integers, so multiplying a uint64 quantum by an arbitrarily large cycle count
+// is exact and cannot silently saturate or overflow.
+func (d *DWRR[T]) fastForward() bool {
+	// At this boundary every queue has had one unproductive visit. For each
+	// head, skip floor((cost-deficit-1)/quantum) additional whole cycles.
+	// The subtraction of one avoids an overflow-prone ceil numerator.
+	skip := new(big.Int)
+	found := false
+	for i, q := range d.queues {
+		if len(q) == 0 || d.quantums[i] == 0 {
+			continue
+		}
+		gap := new(big.Int).Sub(new(big.Int).SetUint64(q[0].Cost), d.deficits[i])
+		if gap.Sign() <= 0 {
+			return true
+		}
+		gap.Sub(gap, big.NewInt(1))
+		cycles := gap.Quo(gap, new(big.Int).SetUint64(d.quantums[i]))
+		if !found || cycles.Cmp(skip) < 0 {
+			skip.Set(cycles)
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	if skip.Sign() == 0 {
+		return true
+	}
+	for i, q := range d.queues {
+		if len(q) > 0 && d.quantums[i] > 0 {
+			credit := new(big.Int).Mul(new(big.Int).SetUint64(d.quantums[i]), skip)
+			d.deficits[i].Add(d.deficits[i], credit)
+		}
+	}
+	return true
 }
