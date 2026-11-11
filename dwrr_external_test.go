@@ -18,3 +18,17 @@ func TestPublicCostAwareAPI(t *testing.T) {
 	require.Equal(t, []dwrr.Scheduled[string]{{Queue: 1, Value: "x", Cost: 4}}, scheduler.Take(1))
 	require.Equal(t, []dwrr.Scheduled[string]{{Queue: 1, Value: "y", Cost: 1}}, scheduler.Take(1))
 }
+
+func TestPublicDirectQueueRemovalAPI(t *testing.T) {
+	scheduler := dwrr.NewDWRR[string](0)
+	queue := scheduler.AddQueue()
+	require.Equal(t, uint(0), queue)
+	require.NoError(t, scheduler.Enqueue(queue, []dwrr.Item[string]{{Value: "head", Cost: 1}, {Value: "tail", Cost: 2}}))
+	item, ok := scheduler.RemoveHead(queue)
+	require.True(t, ok)
+	require.Equal(t, dwrr.Item[string]{Value: "head", Cost: 1}, item)
+	require.Equal(t, []dwrr.Item[string]{{Value: "tail", Cost: 2}}, scheduler.DrainQueue(queue))
+	item, ok = scheduler.RemoveHead(queue)
+	require.False(t, ok)
+	require.Equal(t, dwrr.Item[string]{}, item)
+}

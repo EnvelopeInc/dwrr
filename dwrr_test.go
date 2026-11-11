@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"reflect"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 )
@@ -138,7 +139,9 @@ func cloneForTest(d *DWRR[int]) *DWRR[int] {
 	for i := range d.queues {
 		x.queues[i] = append([]Item[int](nil), d.queues[i]...)
 		x.quantums[i] = d.quantums[i]
+		x.deficits[i].Set(d.deficits[i])
 	}
+	x.cursor, x.active = d.cursor, d.active
 	return x
 }
 
@@ -265,22 +268,62 @@ func TestEnqueueCopiesItemCost(t *testing.T) {
 	}
 }
 
-func TestDequeueClearsStorageAndReturnsCopy(t *testing.T) {
+func TestRemoveHeadClearsStorageAndReturnsCopy(t *testing.T) {
 	first, second := 42, 43
 	d := NewDWRR[*int](1)
 	mustEnqueue(t, d, 0, []Item[*int]{{&first, 1}, {&second, 1}})
 	backing := d.queues[0]
 
-	item := d.Dequeue(0)
-	if item == nil || item.Value != &first || item.Cost != 1 {
+	item, ok := d.RemoveHead(0)
+	if !ok || item.Value != &first || item.Cost != 1 {
 		t.Fatalf("unexpected direct removal: %v", item)
 	}
 	if backing[0].Value != nil || backing[0].Cost != 0 {
 		t.Fatal("dequeued value remains in queue storage")
 	}
 	item.Value = nil
-	if next := d.Dequeue(0); next == nil || next.Value != &second {
+	if next, ok := d.RemoveHead(0); !ok || next.Value != &second {
 		t.Fatalf("returned copy changed remaining FIFO item: %v", next)
+	}
+	if empty, ok := d.RemoveHead(0); ok || !reflect.DeepEqual(empty, Item[*int]{}) {
+		t.Fatalf("empty removal = (%v, %t), want zero item and false", empty, ok)
+	}
+}
+
+func TestDrainQueueClearsStorageAndReturnsOwnedItems(t *testing.T) {
+	first, second := 42, 43
+	d := NewDWRR[*int](1)
+	mustEnqueue(t, d, 0, []Item[*int]{{&first, 1}, {&second, 2}})
+	backing := d.queues[0]
+	got := d.DrainQueue(0)
+	if !reflect.DeepEqual(got, []Item[*int]{{&first, 1}, {&second, 2}}) {
+		t.Fatalf("unexpected drained items: %v", got)
+	}
+	for i, item := range backing {
+		if item != (Item[*int]{}) {
+			t.Fatalf("removed reference remains at storage index %d: %v", i, item)
+		}
+	}
+	got[0].Value = nil
+	if got[1].Value != &second {
+		t.Fatal("returned drain slice does not own its item records")
+	}
+}
+
+func TestRemoveHeadPreservesActiveVisitWhenItemsRemain(t *testing.T) {
+	d := NewDWRR[int](2)
+	mustQuantum(t, d, 0, 4)
+	mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 8}, {3, 1}})
+	mustEnqueue(t, d, 1, []Item[int]{{9, 1}})
+	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || !d.active {
+		t.Fatalf("failed to prepare active visit: %v", got)
+	}
+	deficit, cursor := new(big.Int).Set(d.deficits[0]), d.cursor
+	if item, ok := d.RemoveHead(0); !ok || item.Value != 2 {
+		t.Fatalf("unexpected direct removal: %v, %t", item, ok)
+	}
+	if !d.active || d.cursor != cursor || d.deficits[0].Cmp(deficit) != 0 {
+		t.Fatalf("removing a nonempty head changed visit: cursor=%d active=%t deficit=%s", d.cursor, d.active, d.deficits[0])
 	}
 }
 
@@ -289,8 +332,8 @@ func TestValidationAtomicityAndPanics(t *testing.T) {
 	for _, operation := range []func(){
 		func() { _ = d.SetQuantum(1, 0) },
 		func() { _ = d.Enqueue(1, []Item[int]{{Value: 1, Cost: 0}}) },
-		func() { d.Dequeue(1) },
-		func() { d.DequeueAll(1) },
+		func() { d.RemoveHead(1) },
+		func() { d.DrainQueue(1) },
 	} {
 		func() {
 			defer func() {
@@ -323,6 +366,79 @@ func TestValidationAtomicityAndPanics(t *testing.T) {
 		d.Take(-1)
 	}()
 }
+func TestSetQuantumUnchangedIsNoOp(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func() *DWRR[int]
+	}{
+		{
+			name: "active remaining-credit visit",
+			setup: func() *DWRR[int] {
+				d := NewDWRR[int](2)
+				mustQuantum(t, d, 0, 3)
+				mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 10}})
+				if got := d.Take(1); len(got) != 1 || !d.active {
+					t.Fatalf("failed to prepare active visit: %v", got)
+				}
+				return d
+			},
+		},
+		{
+			name: "inactive accrued deficit",
+			setup: func() *DWRR[int] {
+				d := NewDWRR[int](2)
+				mustQuantum(t, d, 0, 2)
+				mustEnqueue(t, d, 0, []Item[int]{{1, 9}})
+				mustEnqueue(t, d, 1, []Item[int]{{2, 1}})
+				d.Take(1)
+				return d
+			},
+		},
+		{
+			name: "after fast-forward",
+			setup: func() *DWRR[int] {
+				d := NewDWRR[int](2)
+				mustEnqueue(t, d, 0, []Item[int]{{1, 20}})
+				mustEnqueue(t, d, 1, []Item[int]{{2, 5}})
+				d.Take(1)
+				return d
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.setup()
+			control := cloneForTest(d)
+			if err := d.SetQuantum(0, d.quantums[0]); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(d.quantums, control.quantums) || d.cursor != control.cursor || d.active != control.active {
+				t.Fatalf("unchanged quantum altered state: cursor=%d active=%t deficits=%v", d.cursor, d.active, d.deficits)
+			}
+			for q := range d.queues {
+				if len(d.queues[q]) != len(control.queues[q]) {
+					t.Fatalf("unchanged quantum altered queue %d", q)
+				}
+				for i := range d.queues[q] {
+					if d.queues[q][i] != control.queues[q][i] {
+						t.Fatalf("unchanged quantum altered queue %d item %d", q, i)
+					}
+				}
+			}
+			for q := range d.deficits {
+				if d.deficits[q].Cmp(control.deficits[q]) != 0 {
+					t.Fatalf("unchanged quantum altered deficit %d: %s != %s", q, d.deficits[q], control.deficits[q])
+				}
+			}
+			for i := 0; i < 12; i++ {
+				if got, want := d.Take(1), control.Take(1); !reflect.DeepEqual(got, want) {
+					t.Fatalf("service order changed at %d: got %v want %v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestQuantumAccumulatesUntilHeadIsAffordable(t *testing.T) {
 	d := NewDWRR[int](1)
 	mustQuantum(t, d, 0, 2)
@@ -343,9 +459,9 @@ func TestEmptyQueueResetsDeficitAndReenqueue(t *testing.T) {
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || d.deficits[0].Uint64() != 2 {
 		t.Fatalf("unexpected first service/deficit: %v %s", got, d.deficits[0])
 	}
-	d.DequeueAll(0)
+	d.DrainQueue(0)
 	if d.deficits[0].Sign() != 0 {
-		t.Fatal("DequeueAll did not reset deficit")
+		t.Fatal("DrainQueue did not reset deficit")
 	}
 	mustEnqueue(t, d, 0, []Item[int]{{3, 4}})
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 3, 4}}) {
@@ -353,7 +469,7 @@ func TestEmptyQueueResetsDeficitAndReenqueue(t *testing.T) {
 	}
 }
 
-func TestActiveDequeueAllCancelsVisitAndAdvances(t *testing.T) {
+func TestActiveDrainQueueCancelsVisitAndAdvances(t *testing.T) {
 	d := NewDWRR[int](2)
 	mustQuantum(t, d, 0, 4)
 	mustEnqueue(t, d, 0, []Item[int]{{Value: 1, Cost: 1}, {Value: 2, Cost: 4}})
@@ -361,25 +477,25 @@ func TestActiveDequeueAllCancelsVisitAndAdvances(t *testing.T) {
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 0, Value: 1, Cost: 1}}) || !d.active {
 		t.Fatalf("expected paused active visit, got %v active=%t", got, d.active)
 	}
-	if got := d.DequeueAll(0); !reflect.DeepEqual(got, []Item[int]{{Value: 2, Cost: 4}}) {
-		t.Fatalf("DequeueAll result %v", got)
+	if got := d.DrainQueue(0); !reflect.DeepEqual(got, []Item[int]{{Value: 2, Cost: 4}}) {
+		t.Fatalf("DrainQueue result %v", got)
 	}
 	if d.active || d.cursor != 1 || d.deficits[0].Sign() != 0 {
 		t.Fatalf("active visit was not canceled: cursor=%d active=%t deficit=%s", d.cursor, d.active, d.deficits[0])
 	}
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 1, Value: 9, Cost: 1}}) {
-		t.Fatalf("next queue did not run after active DequeueAll: %v", got)
+		t.Fatalf("next queue did not run after active DrainQueue: %v", got)
 	}
 }
 
-func TestDequeueEmptyResetsDeficitBeforeReenqueue(t *testing.T) {
+func TestRemoveHeadEmptyResetsDeficitBeforeReenqueue(t *testing.T) {
 	d := NewDWRR[int](2)
 	mustQuantum(t, d, 0, 3)
 	mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 5}})
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) {
 		t.Fatal(got)
 	}
-	if item := d.Dequeue(0); item == nil || item.Value != 2 {
+	if item, ok := d.RemoveHead(0); !ok || item.Value != 2 {
 		t.Fatalf("unexpected direct removal: %v", item)
 	}
 	mustEnqueue(t, d, 0, []Item[int]{{3, 4}})
@@ -443,7 +559,7 @@ func TestMutationsDuringVisit(t *testing.T) {
 	d.RemoveQueue() // Removing an inactive last queue preserves the active visit.
 	d.AddQueue()
 	mustEnqueue(t, d, 2, []Item[int]{{20, 1}})
-	if item := d.Dequeue(0); item == nil || item.Value != 2 {
+	if item, ok := d.RemoveHead(0); !ok || item.Value != 2 {
 		t.Fatalf("unexpected direct removal: %v", item)
 	}
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 3, 1}}) {
@@ -502,7 +618,7 @@ func TestHugeAdvanceAndUint64Boundary(t *testing.T) {
 	if d.deficits[0].Uint64() != math.MaxUint64-1 {
 		t.Fatalf("unexpected accumulated credit: %s", d.deficits[0])
 	}
-	if item := d.Dequeue(0); item == nil || item.Value != 1 {
+	if item, ok := d.RemoveHead(0); !ok || item.Value != 1 {
 		t.Fatalf("unexpected dequeued head: %v", item)
 	}
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 2, 1}}) {
@@ -652,6 +768,35 @@ func TestSustainedBacklogCostFairness(t *testing.T) {
 	}
 	if difference > 10 {
 		t.Fatalf("cost share outside finite-run tolerance: %v", totals)
+	}
+}
+
+func TestConcurrentAddQueueReturnsDistinctConsecutiveIndices(t *testing.T) {
+	const count = 128
+	d := NewDWRR[int](0)
+	indices := make(chan uint, count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			indices <- d.AddQueue()
+		}()
+	}
+	wg.Wait()
+	close(indices)
+	got := make([]uint, 0, count)
+	for index := range indices {
+		got = append(got, index)
+	}
+	if len(got) != count {
+		t.Fatalf("got %d indices, want %d", len(got), count)
+	}
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	for i, index := range got {
+		if index != uint(i) {
+			t.Fatalf("indices are not distinct consecutive valid indices: %v", got)
+		}
 	}
 }
 

@@ -22,7 +22,9 @@ func TestReferenceGeneratedMutationScenarios(t *testing.T) {
 		trace := make([]string, 0, operationsPerScenario)
 		ensureQueue := func() {
 			if len(r.queues) == 0 {
-				d.AddQueue()
+				if index := d.AddQueue(); index != uint(len(r.queues)) {
+					t.Fatalf("AddQueue returned index %d, want %d", index, len(r.queues))
+				}
 				r.queues = append(r.queues, nil)
 				r.quantum = append(r.quantum, 1)
 				r.deficit = append(r.deficit, 0)
@@ -67,11 +69,11 @@ func TestReferenceGeneratedMutationScenarios(t *testing.T) {
 			case 4:
 				ensureQueue()
 				q := rng.Intn(len(r.queues))
-				trace = append(trace, fmt.Sprintf("Dequeue(%d)", q))
-				var want *Item[int]
-				if len(r.queues[q]) > 0 {
-					item := r.queues[q][0]
-					want = &item
+				trace = append(trace, fmt.Sprintf("RemoveHead(%d)", q))
+				want := Item[int]{}
+				wantOK := len(r.queues[q]) > 0
+				if wantOK {
+					want = r.queues[q][0]
 					r.queues[q] = r.queues[q][1:]
 					if len(r.queues[q]) == 0 {
 						r.deficit[q] = 0
@@ -81,36 +83,41 @@ func TestReferenceGeneratedMutationScenarios(t *testing.T) {
 						}
 					}
 				}
-				if got := d.Dequeue(uint(q)); !reflect.DeepEqual(got, want) {
-					t.Fatalf("seed=%d scenario=%d step=%d Dequeue got=%v want=%v\ntrace=%v", seed, scenario, step, got, want, trace)
+				got, gotOK := d.RemoveHead(uint(q))
+				if gotOK != wantOK || (gotOK && !reflect.DeepEqual(got, want)) {
+					t.Fatalf("seed=%d scenario=%d step=%d RemoveHead got=%v want=%v\ntrace=%v", seed, scenario, step, got, want, trace)
 				}
 			case 5:
 				ensureQueue()
 				q := rng.Intn(len(r.queues))
-				trace = append(trace, fmt.Sprintf("DequeueAll(%d)", q))
+				trace = append(trace, fmt.Sprintf("DrainQueue(%d)", q))
 				want := append([]Item[int](nil), r.queues[q]...)
-				got := d.DequeueAll(uint(q))
+				got := d.DrainQueue(uint(q))
 				r.queues[q], r.deficit[q] = nil, 0
 				if r.active && r.cursor == q {
 					r.active = false
 					r.cursor = (q + 1) % len(r.queues)
 				}
 				if len(got) != len(want) || (len(got) > 0 && !reflect.DeepEqual(got, want)) {
-					t.Fatalf("seed=%d scenario=%d step=%d DequeueAll got=%v want=%v\ntrace=%v", seed, scenario, step, got, want, trace)
+					t.Fatalf("seed=%d scenario=%d step=%d DrainQueue got=%v want=%v\ntrace=%v", seed, scenario, step, got, want, trace)
 				}
 			case 6:
 				ensureQueue()
 				q, quantum := rng.Intn(len(r.queues)), uint64(1+rng.Intn(8))
 				trace = append(trace, fmt.Sprintf("SetQuantum(%d,%d)", q, quantum))
 				mustQuantum(t, d, uint(q), quantum)
-				r.quantum[q], r.deficit[q] = quantum, 0
-				if r.active && r.cursor == q {
-					r.active = false
-					r.cursor = (q + 1) % len(r.queues)
+				if r.quantum[q] != quantum {
+					r.quantum[q], r.deficit[q] = quantum, 0
+					if r.active && r.cursor == q {
+						r.active = false
+						r.cursor = (q + 1) % len(r.queues)
+					}
 				}
 			case 7:
 				trace = append(trace, "AddQueue()")
-				d.AddQueue()
+				if index := d.AddQueue(); index != uint(len(r.queues)) {
+					t.Fatalf("seed=%d scenario=%d step=%d AddQueue returned index %d, want %d", seed, scenario, step, index, len(r.queues))
+				}
 				r.queues = append(r.queues, nil)
 				r.quantum = append(r.quantum, 1)
 				r.deficit = append(r.deficit, 0)

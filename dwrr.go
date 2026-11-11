@@ -41,7 +41,9 @@ type DWRR[T any] struct {
 	active   bool       // Whether the current cursor visit has already received quantum.
 }
 
-// NewDWRR creates count empty queues, each with quantum 1.
+// NewDWRR creates count empty queues, each with quantum 1. Queue indices start
+// at zero and remain stable while their queues exist; AddQueue and RemoveQueue
+// change the count, with RemoveQueue affecting only the last queue.
 func NewDWRR[T any](count uint) *DWRR[T] {
 	n := int(count)
 	d := &DWRR[T]{queues: make([][]Item[T], n), quantums: make([]uint64, n), deficits: make([]*big.Int, n)}
@@ -53,14 +55,18 @@ func NewDWRR[T any](count uint) *DWRR[T] {
 }
 
 // SetQuantum changes a queue's quantum, clears its deficit and cancels its
-// active visit. The new quantum is granted at that queue's next visit.
-// Zero quantum returns ErrZeroQuantum without changing state. Invalid indices panic.
+// active visit. The new quantum is granted at that queue's next visit. Setting
+// the current quantum is a no-op. Zero quantum returns ErrZeroQuantum without
+// changing state. Invalid indices panic.
 func (d *DWRR[T]) SetQuantum(queue uint, quantum uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	configuredQuantum := &d.quantums[queue] // Preserve slice-index panic behavior.
 	if quantum == 0 {
 		return ErrZeroQuantum
+	}
+	if *configuredQuantum == quantum {
+		return nil
 	}
 	*configuredQuantum = quantum
 	d.deficits[queue].SetUint64(0)
@@ -88,13 +94,17 @@ func (d *DWRR[T]) Enqueue(queue uint, items []Item[T]) error {
 	return nil
 }
 
-// AddQueue appends an empty queue with quantum 1.
-func (d *DWRR[T]) AddQueue() {
+// AddQueue appends an empty queue with quantum 1 and returns its index. The
+// index is stable while the queue exists; if the last queue is removed, a later
+// AddQueue may reuse its index.
+func (d *DWRR[T]) AddQueue() uint {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	index := uint(len(d.queues))
 	d.queues = append(d.queues, nil)
 	d.quantums = append(d.quantums, 1)
 	d.deficits = append(d.deficits, new(big.Int))
+	return index
 }
 
 // RemoveQueue removes the last queue and its contents. Existing queue indices
@@ -124,15 +134,16 @@ func (d *DWRR[T]) RemoveQueue() {
 	}
 }
 
-// Dequeue removes and returns a copy of the FIFO head, or nil when empty. If
-// it empties the queue, deficit is reset and an active visit is canceled. If
-// items remain, deficit and active-visit state are preserved.
-func (d *DWRR[T]) Dequeue(queue uint) *Item[T] {
+// RemoveHead removes and returns a copy of the FIFO head. It returns the zero
+// Item and false when empty. If items remain, deficit and active-visit state are
+// preserved; emptying the queue resets deficit and cancels an active visit.
+// Invalid indices panic.
+func (d *DWRR[T]) RemoveHead(queue uint) (Item[T], bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q := int(queue)
 	if len(d.queues[q]) == 0 {
-		return nil
+		return Item[T]{}, false
 	}
 	item := d.queues[q][0]
 	clear(d.queues[q][:1])
@@ -144,16 +155,17 @@ func (d *DWRR[T]) Dequeue(queue uint) *Item[T] {
 			d.cursor = (d.cursor + 1) % len(d.queues)
 		}
 	}
-	return &item
+	return item, true
 }
 
-// DequeueAll removes and returns every queued item and resets deficit. If this
-// queue is active, its visit is canceled. Invalid indices panic.
-func (d *DWRR[T]) DequeueAll(queue uint) []Item[T] {
+// DrainQueue removes and returns a copy of every queued item, resets deficit,
+// and cancels an active visit. Invalid indices panic.
+func (d *DWRR[T]) DrainQueue(queue uint) []Item[T] {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q := int(queue)
-	items := d.queues[q]
+	items := append([]Item[T](nil), d.queues[q]...)
+	clear(d.queues[q])
 	d.queues[q] = nil
 	d.deficits[q].SetUint64(0)
 	if d.active && d.cursor == q {
