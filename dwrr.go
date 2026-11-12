@@ -181,6 +181,11 @@ func (d *DWRR[T]) RemoveHead(queue uint) (Item[T], bool) {
 	if len(d.queues[q]) == 0 {
 		return Item[T]{}, false
 	}
+	return d.popHead(q), true
+}
+
+// popHead removes the head of nonempty queue q. The caller holds d.mu.
+func (d *DWRR[T]) popHead(q int) Item[T] {
 	item := d.queues[q][0]
 	clear(d.queues[q][:1])
 	if len(d.queues[q]) == 1 {
@@ -194,11 +199,10 @@ func (d *DWRR[T]) RemoveHead(queue uint) (Item[T], bool) {
 		d.busyCount--
 		d.deficits[q] = 0
 		if d.active && d.cursor == q {
-			d.active = false
-			d.cursor = (d.cursor + 1) % len(d.queues)
+			d.closeVisit()
 		}
 	}
-	return item, true
+	return item
 }
 
 // DrainQueue removes and returns a copy of every queued item, resets deficit,
@@ -217,8 +221,7 @@ func (d *DWRR[T]) DrainQueue(queue uint) []Item[T] {
 	d.queues[q] = nil
 	d.deficits[q] = 0
 	if d.active && d.cursor == q {
-		d.active = false
-		d.cursor = (d.cursor + 1) % len(d.queues)
+		d.closeVisit()
 	}
 	return items
 }
@@ -254,20 +257,8 @@ func (d *DWRR[T]) Take(n int) []Scheduled[T] {
 				d.closeVisit()
 			} else {
 				d.deficits[q] -= head.Cost
+				head = d.popHead(q)
 				out = append(out, Scheduled[T]{Queue: uint(q), Value: head.Value, Cost: head.Cost})
-				clear(d.queues[q][:1])
-				if len(d.queues[q]) == 1 {
-					d.queues[q] = d.queues[q][:0]
-				} else {
-					d.queues[q] = d.queues[q][1:]
-				}
-				d.total--
-				if len(d.queues[q]) == 0 {
-					d.busy[q/64] &^= uint64(1) << (q % 64)
-					d.busyCount--
-					d.deficits[q] = 0
-					d.closeVisit()
-				}
 				grantsSinceService = 0
 			}
 		}
