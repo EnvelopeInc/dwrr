@@ -2,7 +2,6 @@ package dwrr
 
 import (
 	"math"
-	"math/big"
 	"math/rand"
 	"reflect"
 	"runtime"
@@ -118,7 +117,7 @@ func TestReferenceGeneratedScenarios(t *testing.T) {
 			t.Fatalf("scenario %d state mismatch", scenario)
 		}
 		for q := 0; q < n; q++ {
-			if d.deficits[q].Uint64() != r.deficit[q] {
+			if d.deficits[q] != r.deficit[q] {
 				t.Fatalf("scenario %d deficit q%d", scenario, q)
 			}
 		}
@@ -139,7 +138,7 @@ func cloneForTest(d *DWRR[int]) *DWRR[int] {
 	for i := range d.queues {
 		x.queues[i] = append([]Item[int](nil), d.queues[i]...)
 		x.quantums[i] = d.quantums[i]
-		x.deficits[i].Set(d.deficits[i])
+		x.deficits[i] = d.deficits[i]
 	}
 	x.cursor, x.active = d.cursor, d.active
 	return x
@@ -199,7 +198,7 @@ func TestTakeZeroPreservesPausedVisit(t *testing.T) {
 		t.Fatal("Take(0) changed scheduler state")
 	}
 	for i := range pending.deficits {
-		if pending.deficits[i].Cmp(control.deficits[i]) != 0 {
+		if pending.deficits[i] != control.deficits[i] {
 			t.Fatal("Take(0) changed deficit")
 		}
 	}
@@ -220,7 +219,7 @@ func TestTakeLimitEquivalentToRepeatedSingleItemCalls(t *testing.T) {
 		t.Fatal("Take(n) differs from repeated Take(1) state")
 	}
 	for i := range a.deficits {
-		if a.deficits[i].Cmp(b.deficits[i]) != 0 {
+		if a.deficits[i] != b.deficits[i] {
 			t.Fatal("Take(n) differs from repeated Take(1) deficit")
 		}
 	}
@@ -235,8 +234,8 @@ func TestTakeLimitEquivalentToRepeatedSingleItemCalls(t *testing.T) {
 	}
 	pending := NewDWRR[int](1)
 	mustEnqueue(t, pending, 0, []Item[int]{{1, 1}})
-	before := pending.deficits[0].String()
-	if x := pending.Take(0); x == nil || len(x) != 0 || before != pending.deficits[0].String() {
+	before := pending.deficits[0]
+	if x := pending.Take(0); x == nil || len(x) != 0 || before != pending.deficits[0] {
 		t.Fatal("Take(0) altered state")
 	}
 	got := pending.Take(math.MaxInt)
@@ -318,12 +317,12 @@ func TestRemoveHeadPreservesActiveVisitWhenItemsRemain(t *testing.T) {
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || !d.active {
 		t.Fatalf("failed to prepare active visit: %v", got)
 	}
-	deficit, cursor := new(big.Int).Set(d.deficits[0]), d.cursor
+	deficit, cursor := d.deficits[0], d.cursor
 	if item, ok := d.RemoveHead(0); !ok || item.Value != 2 {
 		t.Fatalf("unexpected direct removal: %v, %t", item, ok)
 	}
-	if !d.active || d.cursor != cursor || d.deficits[0].Cmp(deficit) != 0 {
-		t.Fatalf("removing a nonempty head changed visit: cursor=%d active=%t deficit=%s", d.cursor, d.active, d.deficits[0])
+	if !d.active || d.cursor != cursor || d.deficits[0] != deficit {
+		t.Fatalf("removing a nonempty head changed visit: cursor=%d active=%t deficit=%d", d.cursor, d.active, d.deficits[0])
 	}
 }
 
@@ -426,8 +425,8 @@ func TestSetQuantumUnchangedIsNoOp(t *testing.T) {
 				}
 			}
 			for q := range d.deficits {
-				if d.deficits[q].Cmp(control.deficits[q]) != 0 {
-					t.Fatalf("unchanged quantum altered deficit %d: %s != %s", q, d.deficits[q], control.deficits[q])
+				if d.deficits[q] != control.deficits[q] {
+					t.Fatalf("unchanged quantum altered deficit %d: %d != %d", q, d.deficits[q], control.deficits[q])
 				}
 			}
 			for i := 0; i < 12; i++ {
@@ -469,8 +468,8 @@ func TestQuantumAccumulatesUntilHeadIsAffordable(t *testing.T) {
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 5}}) {
 		t.Fatalf("large-cost head was not made eligible: %v", got)
 	}
-	if d.deficits[0].Uint64() != 1 || !d.active {
-		t.Fatalf("visit did not preserve remainder: deficit=%s active=%t", d.deficits[0], d.active)
+	if d.deficits[0] != 1 || !d.active {
+		t.Fatalf("visit did not preserve remainder: deficit=%d active=%t", d.deficits[0], d.active)
 	}
 }
 
@@ -478,11 +477,11 @@ func TestEmptyQueueResetsDeficitAndReenqueue(t *testing.T) {
 	d := NewDWRR[int](1)
 	mustQuantum(t, d, 0, 3)
 	mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 5}})
-	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || d.deficits[0].Uint64() != 2 {
-		t.Fatalf("unexpected first service/deficit: %v %s", got, d.deficits[0])
+	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || d.deficits[0] != 2 {
+		t.Fatalf("unexpected first service/deficit: %v %d", got, d.deficits[0])
 	}
 	d.DrainQueue(0)
-	if d.deficits[0].Sign() != 0 {
+	if d.deficits[0] != 0 {
 		t.Fatal("DrainQueue did not reset deficit")
 	}
 	mustEnqueue(t, d, 0, []Item[int]{{3, 4}})
@@ -502,8 +501,8 @@ func TestActiveDrainQueueCancelsVisitAndAdvances(t *testing.T) {
 	if got := d.DrainQueue(0); !reflect.DeepEqual(got, []Item[int]{{Value: 2, Cost: 4}}) {
 		t.Fatalf("DrainQueue result %v", got)
 	}
-	if d.active || d.cursor != 1 || d.deficits[0].Sign() != 0 {
-		t.Fatalf("active visit was not canceled: cursor=%d active=%t deficit=%s", d.cursor, d.active, d.deficits[0])
+	if d.active || d.cursor != 1 || d.deficits[0] != 0 {
+		t.Fatalf("active visit was not canceled: cursor=%d active=%t deficit=%d", d.cursor, d.active, d.deficits[0])
 	}
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 1, Value: 9, Cost: 1}}) {
 		t.Fatalf("next queue did not run after active DrainQueue: %v", got)
@@ -537,8 +536,8 @@ func TestEnqueueAwaitingCreditPreservesFIFOAndDeficit(t *testing.T) {
 	mustQuantum(t, d, 1, 1)
 	mustEnqueue(t, d, 0, []Item[int]{{1, 2}})
 	mustEnqueue(t, d, 1, []Item[int]{{9, 1}, {10, 1}})
-	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{1, 9, 1}}) || d.deficits[0].Uint64() != 1 {
-		t.Fatalf("unexpected first result/credit: %v deficit=%s", got, d.deficits[0])
+	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{1, 9, 1}}) || d.deficits[0] != 1 {
+		t.Fatalf("unexpected first result/credit: %v deficit=%d", got, d.deficits[0])
 	}
 	mustEnqueue(t, d, 0, []Item[int]{{2, 1}}) // FIFO tail; retain the existing credit.
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 2}}) {
@@ -628,17 +627,17 @@ func TestMutationsDuringVisit(t *testing.T) {
 	}
 }
 func TestHugeAdvanceAndUint64Boundary(t *testing.T) {
-	// A dequeue exposes a cheap head while retaining deficit. The next grant
-	// makes credit exceed uint64, and Take pauses that active visit afterward.
+	// A removal exposes a cheap head while retaining deficit. The next grant
+	// makes credit exceed MaxCost, but remains exactly representable in uint64.
 	d := NewDWRR[int](2)
-	mustQuantum(t, d, 0, math.MaxUint64-1)
-	mustEnqueue(t, d, 0, []Item[int]{{1, math.MaxUint64}, {2, 1}, {3, 1}})
+	mustQuantum(t, d, 0, MaxQuantum-1)
+	mustEnqueue(t, d, 0, []Item[int]{{1, MaxCost}, {2, 1}, {3, 1}})
 	mustEnqueue(t, d, 1, []Item[int]{{9, 1}})
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{1, 9, 1}}) {
 		t.Fatal(got)
 	}
-	if d.deficits[0].Uint64() != math.MaxUint64-1 {
-		t.Fatalf("unexpected accumulated credit: %s", d.deficits[0])
+	if d.deficits[0] != MaxQuantum-1 {
+		t.Fatalf("unexpected accumulated credit: %d", d.deficits[0])
 	}
 	if item, ok := d.RemoveHead(0); !ok || item.Value != 1 {
 		t.Fatalf("unexpected dequeued head: %v", item)
@@ -646,19 +645,19 @@ func TestHugeAdvanceAndUint64Boundary(t *testing.T) {
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 2, 1}}) {
 		t.Fatal(got)
 	}
-	if d.deficits[0].Cmp(new(big.Int).SetUint64(math.MaxUint64)) <= 0 || !d.active {
-		t.Fatalf("paused visit lost over-uint64 credit: %s", d.deficits[0])
+	if d.deficits[0] != 2*(MaxQuantum-1)-1 || !d.active {
+		t.Fatalf("paused visit lost exact accumulated credit: %d", d.deficits[0])
 	}
 
 	d = NewDWRR[int](1)
 	mustQuantum(t, d, 0, 1)
-	mustEnqueue(t, d, 0, []Item[int]{{1, math.MaxUint64}})
+	mustEnqueue(t, d, 0, []Item[int]{{1, MaxCost}})
 	if got := d.Take(1); len(got) != 1 || got[0].Value != 1 {
 		t.Fatal(got)
 	}
 	d = NewDWRR[int](1)
-	mustQuantum(t, d, 0, math.MaxUint64)
-	mustEnqueue(t, d, 0, []Item[int]{{1, math.MaxUint64}, {2, math.MaxUint64}})
+	mustQuantum(t, d, 0, MaxQuantum)
+	mustEnqueue(t, d, 0, []Item[int]{{1, MaxCost}, {2, MaxCost}})
 	got := d.Take(2)
 	if len(got) != 2 || got[0].Value != 1 || got[1].Value != 2 {
 		t.Fatal(got)
@@ -686,7 +685,7 @@ func TestFastForwardTieAndNearTieOrder(t *testing.T) {
 			if got := d.Take(1); !reflect.DeepEqual(got, want) {
 				t.Fatalf("wrong fast-forward winner: got %v want %v", got, want)
 			}
-			if d.deficits[0].Uint64() != tc.wantDef0 || d.deficits[1].Uint64() != tc.wantDef1 || d.cursor != int(1-tc.winner) || d.active {
+			if d.deficits[0] != tc.wantDef0 || d.deficits[1] != tc.wantDef1 || d.cursor != int(1-tc.winner) || d.active {
 				t.Fatalf("unexpected post-tie state: deficits=%v cursor=%d active=%t", d.deficits, d.cursor, d.active)
 			}
 		})
@@ -694,7 +693,7 @@ func TestFastForwardTieAndNearTieOrder(t *testing.T) {
 }
 
 func TestFastForwardMaxCostWithTwoActiveQueues(t *testing.T) {
-	const cost = uint64(math.MaxUint64)
+	const cost = MaxCost
 	d := NewDWRR[int](2)
 	mustQuantum(t, d, 0, 1)
 	mustQuantum(t, d, 1, 2)
@@ -702,23 +701,23 @@ func TestFastForwardMaxCostWithTwoActiveQueues(t *testing.T) {
 	mustEnqueue(t, d, 1, []Item[int]{{Value: 1, Cost: cost}})
 
 	// After the initial visit each, queue 1 has 2 credit. The exact number of
-	// additional no-service cycles is floor((MaxUint64-3)/2); queue 1
-	// then receives its next quantum and reaches MaxUint64 first.
-	wantQ0 := new(big.Int).Add(new(big.Int).SetUint64(2), new(big.Int).SetUint64((cost-3)/2))
+	// additional no-service cycles is floor((MaxCost-3)/2); queue 1
+	// then receives its next quantum and reaches MaxCost first.
+	wantQ0 := uint64(2) + (cost-3)/2
 	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 1, Value: 1, Cost: cost}}) {
-		t.Fatalf("unexpected MaxUint64 winner: %v", got)
+		t.Fatalf("unexpected MaxCost winner: %v", got)
 	}
-	if d.deficits[0].Cmp(wantQ0) != 0 || d.deficits[1].Sign() != 0 || d.cursor != 0 || d.active {
-		t.Fatalf("unexpected state after MaxUint64 fast-forward: deficits=%v cursor=%d active=%t want q0=%s", d.deficits, d.cursor, d.active, wantQ0)
+	if d.deficits[0] != wantQ0 || d.deficits[1] != 0 || d.cursor != 0 || d.active {
+		t.Fatalf("unexpected state after MaxCost fast-forward: deficits=%v cursor=%d active=%t want q0=%d", d.deficits, d.cursor, d.active, wantQ0)
 	}
 
 	// One more bounded result advances queue 0 through its remaining fast-forward
-	// and consumes its MaxUint64 head; the cheap tail remains in the active visit.
+	// and consumes its MaxCost head; the cheap tail remains in the active visit.
 	got := d.Take(1)
 	if !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 0, Value: 0, Cost: cost}}) {
 		t.Fatalf("unexpected bounded follow-up: %v", got)
 	}
-	if d.deficits[0].Sign() != 0 || d.deficits[1].Sign() != 0 || d.cursor != 0 || !d.active || !reflect.DeepEqual(d.queues[0], []Item[int]{{Value: 2, Cost: 1}}) {
+	if d.deficits[0] != 0 || d.deficits[1] != 0 || d.cursor != 0 || !d.active || !reflect.DeepEqual(d.queues[0], []Item[int]{{Value: 2, Cost: 1}}) {
 		t.Fatalf("unexpected state after bounded follow-up: queues=%v deficits=%v cursor=%d active=%t", d.queues, d.deficits, d.cursor, d.active)
 	}
 }
@@ -727,8 +726,8 @@ func TestRemoveFinalQueueWithCreditAndReAdd(t *testing.T) {
 	d := NewDWRR[int](1)
 	mustQuantum(t, d, 0, 3)
 	mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 5}})
-	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || d.deficits[0].Uint64() != 2 {
-		t.Fatalf("expected nonzero carried credit: %v deficit=%s", got, d.deficits[0])
+	if got := d.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 1, 1}}) || d.deficits[0] != 2 {
+		t.Fatalf("expected nonzero carried credit: %v deficit=%d", got, d.deficits[0])
 	}
 	d.RemoveQueue()
 	if len(d.queues) != 0 || d.cursor != 0 || d.active {
@@ -758,8 +757,8 @@ func TestFastForwardAcrossMultipleBackloggedQueues(t *testing.T) {
 	if !reflect.DeepEqual(got, []Scheduled[int]{{Queue: 1, Value: 1, Cost: cost}}) {
 		t.Fatalf("wrong first eligible queue after fast-forward: %v", got)
 	}
-	if d.deficits[0].Uint64() != 500_000_000 {
-		t.Fatalf("credits for other active queue were not advanced: %s", d.deficits[0])
+	if d.deficits[0] != 500_000_000 {
+		t.Fatalf("credits for other active queue were not advanced: %d", d.deficits[0])
 	}
 }
 

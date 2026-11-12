@@ -2,7 +2,6 @@ package dwrr
 
 import (
 	"fmt"
-	"math/big"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -37,8 +36,8 @@ func TestReferenceGeneratedMutationScenarios(t *testing.T) {
 				t.Fatalf("seed=%d scenario=%d step=%d state mismatch\ntrace=%v\ngot queues=%v quantum=%v deficits=%v cursor=%d active=%t\nwant queues=%v quantum=%v deficits=%v cursor=%d active=%t", seed, scenario, step, trace, d.queues, d.quantums, d.deficits, d.cursor, d.active, r.queues, r.quantum, r.deficit, r.cursor, r.active)
 			}
 			for q := range r.deficit {
-				if d.deficits[q].Cmp(new(big.Int).SetUint64(r.deficit[q])) != 0 {
-					t.Fatalf("seed=%d scenario=%d step=%d deficit q=%d got=%s want=%d\ntrace=%v", seed, scenario, step, q, d.deficits[q], r.deficit[q], trace)
+				if d.deficits[q] != r.deficit[q] {
+					t.Fatalf("seed=%d scenario=%d step=%d deficit q=%d got=%d want=%d\ntrace=%v", seed, scenario, step, q, d.deficits[q], r.deficit[q], trace)
 				}
 			}
 		}

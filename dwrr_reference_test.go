@@ -2,7 +2,6 @@ package dwrr
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -154,7 +153,7 @@ func runDifferential(t *testing.T, data []byte) {
 			fail("reference active empty queue")
 		}
 		for q := range r.queues {
-			if len(d.queues[q]) == 0 && d.deficits[q].Sign() != 0 {
+			if len(d.queues[q]) == 0 && d.deficits[q] != 0 {
 				fail("real empty queue %d has credit", q)
 			}
 			if len(r.queues[q]) == 0 && r.deficit[q] != 0 {
@@ -250,7 +249,7 @@ func FuzzDifferential(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) { runDifferential(t, data) })
 }
 
-const boundaryMax = uint64(math.MaxUint64)
+const boundaryMax = MaxCost // MaxQuantum has the same limit.
 
 func TestBoundaryMaximumCostAndQuantum(t *testing.T) {
 	d := NewDWRR[int](1)
@@ -285,6 +284,61 @@ func TestBoundaryPausedCreditAndRemoval(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+func TestBoundaryRangeErrorsPreserveState(t *testing.T) {
+	for _, take := range []int{1, 2} {
+		t.Run(fmt.Sprintf("Take%d", take), func(t *testing.T) {
+			d := NewDWRR[int](2)
+			mustQuantum(t, d, 0, 3)
+			mustEnqueue(t, d, 0, []Item[int]{{1, 1}, {2, 10}})
+			mustEnqueue(t, d, 1, []Item[int]{{9, 1}, {10, 1}})
+			d.Take(take)
+			before := cloneForTest(d)
+			if err := d.SetQuantum(0, MaxQuantum+1); err != ErrQuantumTooLarge {
+				t.Fatalf("oversized quantum: %v", err)
+			}
+			if err := d.SetQuantum(0, 0); err != ErrZeroQuantum {
+				t.Fatalf("zero quantum: %v", err)
+			}
+			if err := d.Enqueue(0, []Item[int]{{3, 1}, {4, MaxCost + 1}}); err != ErrCostTooLarge {
+				t.Fatalf("oversized cost: %v", err)
+			}
+			if !reflect.DeepEqual(d.queues, before.queues) || !reflect.DeepEqual(d.quantums, before.quantums) || !reflect.DeepEqual(d.deficits, before.deficits) || d.cursor != before.cursor || d.active != before.active {
+				t.Fatal("rejected input changed scheduling state")
+			}
+			if got, want := d.Take(10), before.Take(10); !reflect.DeepEqual(got, want) {
+				t.Fatalf("rejection changed service order: got %v want %v", got, want)
+			}
+		})
+	}
+	for _, operation := range []func(){
+		func() { NewDWRR[int](0).SetQuantum(0, MaxQuantum+1) },
+		func() { NewDWRR[int](0).Enqueue(0, []Item[int]{{1, MaxCost + 1}}) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("invalid index did not panic before range validation")
+				}
+			}()
+			operation()
+		}()
+	}
+}
+
+func TestBoundaryFastForwardAllocations(t *testing.T) {
+	d := NewDWRR[int](8)
+	for q := uint(0); q < 8; q++ {
+		mustEnqueue(t, d, q, []Item[int]{{int(q), MaxCost - uint64(q)}})
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		clear(d.deficits)
+		d.fastForward()
+	})
+	if allocations != 0 {
+		t.Fatalf("fastForward allocated %g times, want zero", allocations)
+	}
+}
+
 func TestBoundaryLaterMinimumGap(t *testing.T) {
 	d := NewDWRR[int](3)
 	for q, cost := range []uint64{31, 23, 9} {
