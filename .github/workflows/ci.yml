@@ -27,4 +27,6 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - run: go test -race ./...
+      - if: matrix.go == 'stable'
+        run: go test -run='^$' -fuzz=FuzzDifferential -fuzztime=30s
       - run: go vet ./...
