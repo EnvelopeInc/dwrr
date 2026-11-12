@@ -3,7 +3,7 @@
 `github.com/version2beta/dwrr` is a Go library for fair scheduling across queues, with per-item costs. It implements deficit weighted round robin (DWRR) over FIFO queues of any element type.
 
 <!-- site:skip -->
-Also published at [version2beta.com](https://version2beta.com/TODO-tool-page-url/).
+Also published at [version2beta.com](https://version2beta.com/tools/dwrr-go/).
 <!-- /site:skip -->
 
 ## The need
