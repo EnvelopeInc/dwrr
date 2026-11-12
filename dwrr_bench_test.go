@@ -15,7 +15,7 @@ func BenchmarkTakeSparse10k(b *testing.B) {
 	}
 }
 
-func BenchmarkTakeDense16(b *testing.B) {
+func BenchmarkTakeRotating16(b *testing.B) {
 	d := NewDWRR[int](16)
 	for q := uint(0); q < 16; q++ {
 		if err := d.SetQuantum(q, uint64(q+1)); err != nil {
@@ -29,6 +29,32 @@ func BenchmarkTakeDense16(b *testing.B) {
 			b.Fatal(err)
 		}
 		d.Take(1)
+	}
+}
+
+func BenchmarkTakeBacklogged16(b *testing.B) {
+	d := NewDWRR[int](16)
+	for q := uint(0); q < 16; q++ {
+		if err := d.SetQuantum(q, uint64(q+1)); err != nil {
+			b.Fatal(err)
+		}
+		items := make([]Item[int], 64)
+		for i := range items {
+			items[i] = Item[int]{Value: int(q)*64 + i, Cost: uint64(i%7 + 1)}
+		}
+		if err := d.Enqueue(q, items); err != nil {
+			b.Fatal(err)
+		}
+	}
+	items := make([]Item[int], 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		item := d.Take(1)[0]
+		items[0] = Item[int]{Value: item.Value, Cost: item.Cost}
+		if err := d.Enqueue(item.Queue, items); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

@@ -41,7 +41,7 @@ The method has a limit. A reference checks that the code follows the rules; it c
 | `dwrr_bitmap_test.go` | The busy-queue bitmap: searches that wrap across 64-bit words, removing and reusing the last queue, and service order with sparse busy queues. |
 | `dwrr_storage_test.go` | Queue storage: an emptied queue reuses its storage without allocating, retained storage holds no references to removed values, and `DrainQueue` releases storage. |
 | `dwrr_external_test.go` | The public API exercised from outside the package, as a user would call it. |
-| `dwrr_bench_test.go` | Benchmarks: many idle queues with one busy (`TakeSparse10k`), a few busy queues (`TakeDense16`), batch retrieval (`TakeBatch64`) and large costs with small quanta (`LargeCostSmallQuantum`), which exercises fast-forward. All report allocations. |
+| `dwrr_bench_test.go` | Benchmarks: many idle queues with one busy (`TakeSparse10k`), one item at a time rotating across 16 queues (`TakeRotating16`), 16 continuously backlogged queues (`TakeBacklogged16`), batch retrieval (`TakeBatch64`) and large costs with small quanta (`LargeCostSmallQuantum`), which exercises fast-forward. All report allocations. |
 
 ## Why the arithmetic is exact
 
