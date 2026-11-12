@@ -88,9 +88,6 @@ func (d *DWRR[T]) SetQuantum(queue uint, quantum uint64) error {
 	if quantum > MaxQuantum {
 		return ErrQuantumTooLarge
 	}
-	if *configuredQuantum == quantum {
-		return nil
-	}
 	*configuredQuantum = quantum
 	return nil
 }
