@@ -140,6 +140,8 @@ func cloneForTest(d *DWRR[int]) *DWRR[int] {
 		x.quantums[i] = d.quantums[i]
 		x.deficits[i] = d.deficits[i]
 	}
+	copy(x.busy, d.busy)
+	x.busyCount, x.total = d.busyCount, d.total
 	x.cursor, x.active = d.cursor, d.active
 	return x
 }

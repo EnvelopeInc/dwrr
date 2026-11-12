@@ -2,6 +2,7 @@ package dwrr
 
 import (
 	"fmt"
+	"math/bits"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -152,13 +153,28 @@ func runDifferential(t *testing.T, data []byte) {
 		if r.active && (len(r.queues) == 0 || len(r.queues[r.cursor]) == 0) {
 			fail("reference active empty queue")
 		}
+		busyCount, total, setBits := 0, 0, 0
+		for _, word := range d.busy {
+			setBits += bits.OnesCount64(word)
+		}
 		for q := range r.queues {
+			nonempty := len(d.queues[q]) > 0
+			if bit := d.busy[q/64] & (uint64(1) << (q % 64)); (bit != 0) != nonempty {
+				fail("busy bit mismatch at queue %d", q)
+			}
+			if nonempty {
+				busyCount++
+			}
+			total += len(d.queues[q])
 			if len(d.queues[q]) == 0 && d.deficits[q] != 0 {
 				fail("real empty queue %d has credit", q)
 			}
 			if len(r.queues[q]) == 0 && r.deficit[q] != 0 {
 				fail("reference empty queue %d has credit", q)
 			}
+		}
+		if d.busyCount != busyCount || d.busyCount != setBits || d.total != total {
+			fail("busy/total mismatch: count=%d want=%d bits=%d total=%d want=%d", d.busyCount, busyCount, setBits, d.total, total)
 		}
 	}
 	check()
