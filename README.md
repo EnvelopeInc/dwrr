@@ -5,10 +5,8 @@
 ## Install
 
 ```sh
-go get github.com/EnvelopeInc/dwrr@v0.9.0
+go get github.com/EnvelopeInc/dwrr@v0.10.0
 ```
-
-The published `v0.9.0` still uses the earlier unit-cost `Do` API; the cost-aware `Take` API below is unreleased development code.
 
 ## Example
 
