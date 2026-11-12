@@ -439,6 +439,28 @@ func TestSetQuantumUnchangedIsNoOp(t *testing.T) {
 	}
 }
 
+func TestSetQuantumDoesNotStarve(t *testing.T) {
+	d := NewDWRR[int](2)
+	mustEnqueue(t, d, 0, []Item[int]{{Value: 0, Cost: 10}})
+	items := make([]Item[int], 1000)
+	for i := range items {
+		items[i] = Item[int]{Value: 1, Cost: 1}
+	}
+	mustEnqueue(t, d, 1, items)
+	services := 0
+	for i := 0; i < 1000; i++ {
+		mustQuantum(t, d, 0, uint64(3+i%2))
+		for _, item := range d.Take(1) {
+			if item.Queue == 0 {
+				services++
+			}
+		}
+	}
+	if services != 1 {
+		t.Fatalf("reweighted queue received %d services, want 1", services)
+	}
+}
+
 func TestQuantumAccumulatesUntilHeadIsAffordable(t *testing.T) {
 	d := NewDWRR[int](1)
 	mustQuantum(t, d, 0, 2)
@@ -575,11 +597,11 @@ func TestMutationsDuringVisit(t *testing.T) {
 	mustEnqueue(t, quantumChange, 1, []Item[int]{{9, 1}})
 	quantumChange.Take(1) // Queue 0's visit is active with carried credit.
 	mustQuantum(t, quantumChange, 0, 1)
-	if got := quantumChange.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{1, 9, 1}}) {
-		t.Fatalf("SetQuantum did not cancel the active visit: %v", got)
-	}
 	if got := quantumChange.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{0, 2, 1}}) {
-		t.Fatalf("new quantum was not used on the next visit: %v", got)
+		t.Fatalf("SetQuantum did not preserve the active visit: %v", got)
+	}
+	if got := quantumChange.Take(1); !reflect.DeepEqual(got, []Scheduled[int]{{1, 9, 1}}) {
+		t.Fatalf("next queue did not follow the preserved visit: %v", got)
 	}
 
 	fastForward := NewDWRR[int](2)

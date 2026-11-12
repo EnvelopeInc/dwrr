@@ -60,7 +60,7 @@ Deficit uses exact arbitrary-precision nonnegative arithmetic. A visit can tempo
 All methods synchronize scheduler state; do not copy a `DWRR` after first use. `Take` selects and removes work; the caller owns downstream execution and its concurrency.
 
 - `Enqueue` appends FIFO items. Appending to the active queue joins that same visit at its tail without another quantum.
-- `SetQuantum` clears that queue's deficit and cancels its active visit, if any, only when the quantum changes; the new quantum is granted at its next visit. An unchanged quantum is a true no-op.
+- `SetQuantum` keeps leftover credit and any active visit. A reweight takes effect at the next visit's quantum grant, not when a paused visit resumes; an unchanged quantum is a true no-op. Credit carried from a completed visit is less than the head cost at that time, so this transition effect is bounded and brief. A paused visit keeps the credit it already received.
 - `Take` selects and removes items in service order. `RemoveHead` directly removes the FIFO head without scheduling it, returning an item and `true` or the zero item and `false` when empty. If items remain, it preserves deficit and the active visit; emptying the queue resets deficit and cancels its active visit. `DrainQueue` directly removes all items, resets deficit, and cancels its active visit.
 - `AddQueue` appends an empty queue at quantum 1 and returns its index. Existing indices and an active visit remain unchanged.
 - `RemoveQueue` drops the last queue and its contents; removing the active queue closes its visit. Other indices remain unchanged and the cursor stays valid. Removing from no queues is a no-op.

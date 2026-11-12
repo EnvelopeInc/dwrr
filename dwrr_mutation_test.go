@@ -106,13 +106,7 @@ func TestReferenceGeneratedMutationScenarios(t *testing.T) {
 				q, quantum := rng.Intn(len(r.queues)), uint64(1+rng.Intn(8))
 				trace = append(trace, fmt.Sprintf("SetQuantum(%d,%d)", q, quantum))
 				mustQuantum(t, d, uint(q), quantum)
-				if r.quantum[q] != quantum {
-					r.quantum[q], r.deficit[q] = quantum, 0
-					if r.active && r.cursor == q {
-						r.active = false
-						r.cursor = (q + 1) % len(r.queues)
-					}
-				}
+				r.quantum[q] = quantum // Reweighting preserves credit and the active visit.
 			case 7:
 				trace = append(trace, "AddQueue()")
 				if index := d.AddQueue(); index != uint(len(r.queues)) {

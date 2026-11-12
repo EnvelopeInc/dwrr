@@ -208,10 +208,6 @@ func runDifferential(t *testing.T, data []byte) {
 				fail("DrainQueue got=%v want=%v", got, want)
 			}
 		case 6:
-			// Until SetQuantum preserves credit, only reweight empty queues.
-			if len(r.queues[q]) > 0 || r.deficit[q] != 0 {
-				break
-			}
 			x := uint64(b % 9)
 			trace = append(trace, fmt.Sprintf("SetQuantum(%d,%d)", q, x))
 			if got, want := d.SetQuantum(uint(q), x), r.setQuantum(q, x); got != want {

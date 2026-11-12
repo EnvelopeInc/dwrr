@@ -54,10 +54,10 @@ func NewDWRR[T any](count uint) *DWRR[T] {
 	return d
 }
 
-// SetQuantum changes a queue's quantum, clears its deficit and cancels its
-// active visit. The new quantum is granted at that queue's next visit. Setting
-// the current quantum is a no-op. Zero quantum returns ErrZeroQuantum without
-// changing state. Invalid indices panic.
+// SetQuantum changes a queue's quantum while keeping its deficit and any
+// active visit. The new quantum is used at the next grant, not when a paused
+// visit resumes. Setting the current quantum is a no-op. Zero quantum returns
+// ErrZeroQuantum without changing state. Invalid indices panic.
 func (d *DWRR[T]) SetQuantum(queue uint, quantum uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -69,11 +69,6 @@ func (d *DWRR[T]) SetQuantum(queue uint, quantum uint64) error {
 		return nil
 	}
 	*configuredQuantum = quantum
-	d.deficits[queue].SetUint64(0)
-	if d.active && d.cursor == int(queue) {
-		d.active = false
-		d.cursor = (d.cursor + 1) % len(d.queues)
-	}
 	return nil
 }
 
