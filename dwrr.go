@@ -47,12 +47,12 @@ type DWRR[T any] struct {
 	mu       sync.Mutex
 	queues   [][]Item[T]
 	quantums []uint64
-	// Outside an active visit, deficit is below 2^63: a visit closes below
-	// its head's cost (at most MaxCost), and emptying a queue resets credit.
+	// Outside an active visit, deficit is at most MaxCost-1: a visit closes
+	// below its head's cost (at most MaxCost), and emptying resets credit.
 	// RemoveHead can expose a cheaper head but never increases deficit.
-	// A grant adds at most MaxQuantum, so deficit never exceeds 2^64 - 2.
-	// Fast-forward adds credit only up to the head's cost minus 1.
-	// Plain uint64 arithmetic is therefore exact.
+	// A grant adds at most MaxQuantum, yielding MaxCost-1+MaxQuantum = 2^64-3,
+	// attained by TestBoundaryPeakCreditAfterReweight. Fast-forward adds credit
+	// only up to the head's cost minus 1. Plain uint64 arithmetic is exact.
 	deficits  []uint64
 	busy      []uint64 // One bit per nonempty queue; unused high bits are zero.
 	busyCount int
