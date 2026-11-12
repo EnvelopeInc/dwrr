@@ -133,7 +133,7 @@ The shares follow the weights in bytes, even though message sizes vary from 64 t
 
 ### A worker loop
 
-`Take` never blocks. Producers enqueue work and send a non-blocking wake-up; the worker takes a batch at a time and waits on the wake channel when the scheduler is empty.
+`Take` never waits for work to arrive: when the scheduler is empty, it returns an empty slice. Like every other method, it may wait briefly for the scheduler's lock. Producers enqueue work and send a non-blocking wake-up; the worker takes a batch at a time and waits on the wake channel when the scheduler is empty.
 
 ```go
 package main
@@ -309,7 +309,7 @@ ran report-2
 
 ### Concurrency
 
-- Every method locks the scheduler, so all methods are safe to call from multiple goroutines. Don't copy a `DWRR` after first use.
+- Every method that reads or changes the scheduler holds its lock while it runs, so all methods are safe to call from multiple goroutines. `Take(0)` returns without locking, and a negative `Take` panics before locking. Don't copy a `DWRR` after first use.
 - `Take` selects and removes work; running it, and running it concurrently, is up to you.
 - The lock protects the scheduler's state, not the values you store in `T`.
 
@@ -353,7 +353,7 @@ ran report-2
 | Algorithm | Deficit round robin | Weighted fair queuing | Deficit round robin with strict priority levels |
 | Per-item cost | Declared `uint64` | Item size | Buffer size in bytes |
 | Weights | Per queue | Per item, 1–256 | Shared quantum |
-| Retrieval | Non-blocking `Take(n)` | Blocking, with `Close` | Blocking `Get` |
+| Retrieval | Does not wait for work: `Take(n)` | Blocking, with `Close` | Blocking `Get` |
 | Size limits | None | Total and per-flow | Not documented |
 | Item type | Generic `T` | `interface{}` | Byte buffers |
 | Status | Maintained | Last updated 2014 | Internal; can't be imported from outside its module |
