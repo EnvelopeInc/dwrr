@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.10.1
+
+- Module path moved to `github.com/version2beta/dwrr`. No code changes.
+- v0.9.0 and v0.10.0 remain available at `github.com/EnvelopeInc/dwrr`.
+
 ## v0.10.0
 
 - Replace the unit-cost `Do` API with cost-aware `Take`, returning items in scheduler service order. Retrieval limits preserve a paused visit and its credit.
