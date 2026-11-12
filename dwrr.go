@@ -271,7 +271,7 @@ func (d *DWRR[T]) fastForward() bool {
 	skip := new(big.Int)
 	found := false
 	for i, q := range d.queues {
-		if len(q) == 0 || d.quantums[i] == 0 {
+		if len(q) == 0 {
 			continue
 		}
 		gap := new(big.Int).Sub(new(big.Int).SetUint64(q[0].Cost), d.deficits[i])
@@ -292,7 +292,7 @@ func (d *DWRR[T]) fastForward() bool {
 		return true
 	}
 	for i, q := range d.queues {
-		if len(q) > 0 && d.quantums[i] > 0 {
+		if len(q) > 0 {
 			credit := new(big.Int).Mul(new(big.Int).SetUint64(d.quantums[i]), skip)
 			d.deficits[i].Add(d.deficits[i], credit)
 		}
