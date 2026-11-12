@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.2
+
+No behavior or API changes.
+
+- README rewritten as the library's documentation and tool page; TESTING.md added.
+- README concurrency wording corrected: `Take` never waits for work, but may wait for the scheduler's lock.
+- Internal: queue-head removal shared between `Take` and `RemoveHead`.
+- Benchmarks: `BenchmarkTakeDense16` renamed `BenchmarkTakeRotating16`; `BenchmarkTakeBacklogged16` added.
+
 ## v0.10.1
 
 - Module path moved to `github.com/version2beta/dwrr`. No code changes.
