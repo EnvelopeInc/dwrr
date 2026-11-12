@@ -299,30 +299,26 @@ func (d *DWRR[T]) closeVisit() {
 }
 
 // fastForward skips complete no-service cycles without making a head eligible.
-func (d *DWRR[T]) fastForward() bool {
+// The caller guarantees busyCount > 0.
+func (d *DWRR[T]) fastForward() {
 	skip := ^uint64(0)
-	found := false
 	for word, busy := range d.busy {
 		for busy != 0 {
 			i := word*64 + bits.TrailingZeros64(busy)
 			busy &= busy - 1
 			cost := d.queues[i][0].Cost
 			if d.deficits[i] >= cost {
-				return true
+				return
 			}
 			gap := cost - d.deficits[i]
 			cycles := (gap - 1) / d.quantums[i]
 			if cycles < skip {
 				skip = cycles
 			}
-			found = true
 		}
 	}
-	if !found {
-		return false
-	}
 	if skip == 0 {
-		return true
+		return
 	}
 	for word, busy := range d.busy {
 		for busy != 0 {
@@ -333,5 +329,4 @@ func (d *DWRR[T]) fastForward() bool {
 			d.deficits[i] += skip * d.quantums[i]
 		}
 	}
-	return true
 }
