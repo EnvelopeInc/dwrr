@@ -183,7 +183,11 @@ func (d *DWRR[T]) RemoveHead(queue uint) (Item[T], bool) {
 	}
 	item := d.queues[q][0]
 	clear(d.queues[q][:1])
-	d.queues[q] = d.queues[q][1:]
+	if len(d.queues[q]) == 1 {
+		d.queues[q] = d.queues[q][:0]
+	} else {
+		d.queues[q] = d.queues[q][1:]
+	}
 	d.total--
 	if len(d.queues[q]) == 0 {
 		d.busy[q/64] &^= uint64(1) << (q % 64)
@@ -252,7 +256,11 @@ func (d *DWRR[T]) Take(n int) []Scheduled[T] {
 				d.deficits[q] -= head.Cost
 				out = append(out, Scheduled[T]{Queue: uint(q), Value: head.Value, Cost: head.Cost})
 				clear(d.queues[q][:1])
-				d.queues[q] = d.queues[q][1:]
+				if len(d.queues[q]) == 1 {
+					d.queues[q] = d.queues[q][:0]
+				} else {
+					d.queues[q] = d.queues[q][1:]
+				}
 				d.total--
 				if len(d.queues[q]) == 0 {
 					d.busy[q/64] &^= uint64(1) << (q % 64)
