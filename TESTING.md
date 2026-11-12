@@ -80,7 +80,7 @@ Good tests fail when the code is wrong. To see it:
 
 Other bugs worth planting:
 - remove the `- 1` in `fastForward`'s `(gap - 1) / d.quantums[i]`, so it skips one round too many;
-- delete the line in `popHead` that resets an emptied queue's credit (`d.deficits[q] = 0`).
+- delete the line in `Take` that resets an emptied queue's credit (`d.deficits[q] = 0`); `popHead` has the same reset for `RemoveHead`.
 
 The differential test catches each of these.
 

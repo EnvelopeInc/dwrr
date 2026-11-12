@@ -257,7 +257,24 @@ func (d *DWRR[T]) Take(n int) []Scheduled[T] {
 				d.closeVisit()
 			} else {
 				d.deficits[q] -= head.Cost
-				head = d.popHead(q)
+				// Keep removal local on this hot path: calling popHead per item
+				// regressed scheduling benchmarks when the helper did not inline.
+				head = d.queues[q][0]
+				clear(d.queues[q][:1])
+				if len(d.queues[q]) == 1 {
+					d.queues[q] = d.queues[q][:0]
+				} else {
+					d.queues[q] = d.queues[q][1:]
+				}
+				d.total--
+				if len(d.queues[q]) == 0 {
+					d.busy[q/64] &^= uint64(1) << (q % 64)
+					d.busyCount--
+					d.deficits[q] = 0
+					if d.active && d.cursor == q {
+						d.closeVisit()
+					}
+				}
 				out = append(out, Scheduled[T]{Queue: uint(q), Value: head.Value, Cost: head.Cost})
 				grantsSinceService = 0
 			}

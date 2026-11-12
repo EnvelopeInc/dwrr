@@ -6,7 +6,7 @@ No behavior or API changes.
 
 - README rewritten as the library's documentation and tool page; TESTING.md added.
 - README concurrency wording corrected: `Take` never waits for work, but may wait for the scheduler's lock.
-- Internal: queue-head removal shared between `Take` and `RemoveHead`.
+- Internal: visit closing shared; hot `Take` removal bookkeeping kept local to avoid helper-call overhead.
 - Benchmarks: `BenchmarkTakeDense16` renamed `BenchmarkTakeRotating16`; `BenchmarkTakeBacklogged16` added.
 
 ## v0.10.1
