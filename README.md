@@ -1,66 +1,73 @@
-# dwrr
+# Grocery product catalog subset builder
 
-`github.com/version2beta/dwrr` is a generic cost-aware Deficit Weighted Round Robin scheduler for FIFO queues. Requires Go 1.22.2 or newer.
+Build three **nested**, repeatable grocery catalog sizes using real identifiers and ingredient text from the USDA FoodData Central **Branded Foods CSV** release. About **80% are USDA food products**, and **20% are fictional nonfood general merchandise** (paper goods, laundry, dish/household cleaners, kitchen supplies, personal care, health/beauty, baby/family).
 
-## Install
+The USDA database contains food, **not** these general-merchandise products. Synthetic nonfood records have `source=SYNTHETIC_NONFOOD`, a `SYN-...` internal product ID, and **blank `gtin_upc`**. Do not interpret those as actual retail UPCs. USDA records retain their published UPC/GTIN and FDC IDs.
+
+## Requirements
+
+- Python 3.10+; **standard library only**
+- USDA **Branded Foods CSV** ZIP from <https://fdc.nal.usda.gov/download-datasets/> (download the *Branded* CSV, not the JSON)
+- A few GB of free disk space for the USDA archive, temporary SQLite food metadata index, and outputs
+
+## Run
 
 ```sh
-go get github.com/version2beta/dwrr@v0.10.1
+python3 build_catalogs.py \
+  --usda ~/Downloads/FoodData_Central_branded_food_csv_2026-10-29.zip \
+  --out ~/Development/synth-gen/data/catalog-subsets \
+  --seed 17 \
+  --sizes 500 6000 20000
 ```
 
-## Example
+Use the actual filename you downloaded. The builder can read the ZIP directly or the extracted folder containing `food.csv` and `branded_food.csv`.
 
-```go
-package main
+If nutrition is useful for question generation, add `--nutrition`. This makes an **additional streaming pass** over the large `food_nutrient.csv` and writes selected energy, protein, fat, carbohydrate, fiber, and sodium facts into `nutrition.csv`. For full nutrition coverage, use the full USDA tables; this is only a lightweight selection.
 
-import (
-	"fmt"
+You can also set `--as-of YYYY-MM-DD` and `--scratch /some/existing/directory`. The builder writes only to a new empty output directory and refuses to overwrite existing data.
 
-	"github.com/version2beta/dwrr"
-)
+### Output
 
-func main() {
-	s := dwrr.NewDWRR[string](2)
-	if err := s.SetQuantum(0, 2); err != nil {
-		panic(err)
-	}
-	if err := s.SetQuantum(1, 3); err != nil {
-		panic(err)
-	}
-	if err := s.Enqueue(0, []dwrr.Item[string]{{Value: "a", Cost: 2}, {Value: "b", Cost: 2}}); err != nil {
-		panic(err)
-	}
-	if err := s.Enqueue(1, []dwrr.Item[string]{{Value: "x", Cost: 4}, {Value: "y", Cost: 1}}); err != nil {
-		panic(err)
-	}
-
-	fmt.Println(s.Take(1)) // [{0 a 2}]; queue 0's visit remains active
-	fmt.Println(s.Take(1)) // [{0 b 2}]; queue 1 gets its first quantum and blocks at cost 4
-	fmt.Println(s.Take(1)) // [{1 x 4}]; queue 1 accumulated enough deficit
-	fmt.Println(s.Take(1)) // [{1 y 1}]
-}
+```
+catalog-subsets/
+  catalog_00500/
+    products.csv
+    manifest.json
+    nutrition.csv       # only with --nutrition
+  catalog_06000/
+    products.csv
+    manifest.json
+    nutrition.csv       # only with --nutrition
+  catalog_20000/
+    products.csv
+    manifest.json
+    nutrition.csv       # only with --nutrition
 ```
 
-(The result formatting above is illustrative; the `Scheduled` fields are `Queue`, `Value`, and `Cost`.)
+`products.csv` has these columns:
 
-## Scheduling
+`product_id,source,department,store_category,gtin_upc,fdc_id,brand_owner,brand_name,description,ingredients,publication_date,serving_size,serving_size_unit,branded_food_category,supplier_category`
 
-`NewDWRR[T](count)` creates `count` queues, each with quantum 1. Queue indices start at 0, stay stable while a queue exists, and are fixed in count except for `AddQueue` and `RemoveQueue` (which removes only the last queue). A removed-last index may be reused by a later `AddQueue`; indices are not permanent IDs and are best suited to fixed or slowly changing lanes. `AddQueue()` appends an empty queue at quantum 1 and returns its index. The zero value is unsupported; use the constructor. `Item[T]` has a `Value` and a positive `Cost`; `Scheduled[T]` reports the source queue, value, and cost. `SetQuantum(queue, quantum)` configures a positive quantum and returns `ErrZeroQuantum` for zero. Setting the current quantum is idempotent and changes no scheduler state. `Enqueue` returns `ErrZeroCost` if any item has zero cost and validates the full input before changing the queue. It copies each item record, so an accepted cost cannot change if the caller later modifies its input slice; values of type `T` are shallow-copied. Invalid queue indices panic as slice indexing does.
+The three sizes are **nested within the same run**: the first 500 rows of the 6,000-product catalog are exactly the 500-product catalog, and the first 6,000 rows of the 20,000-product catalog are exactly the 6,000-product catalog. This makes it easier to vary corpus size without removing earlier products.
 
-The scheduler visits queues cyclically. At the start of a visit it adds that queue's quantum to its deficit, then serves affordable FIFO heads consecutively, subtracting each cost. An unaffordable head blocks later items and ends that visit. Unused deficit carries forward while the queue remains nonempty: this is what lets costs larger than one quantum eventually become eligible. Empty queues reset their deficit. A `Take` limit is only a retrieval limit, not a fairness cap: if it interrupts a visit, that visit and its remaining deficit persist, and the next call continues without awarding another quantum. Output is item-by-item in scheduler service order; queue identity remains in each result.
+- Selection is quota-weighted across food and nonfood departments and seeded by stable GTIN hashes.
+- When a GTIN has multiple available versions, the most recently published *selected candidate* is kept within its department.
+- Nutrient data is always attached to specific FDC food IDs.
+- `manifest.json` includes selection counts, source counts, seed, source ZIP hash, and the product CSV hash.
+- Ingredients are copied from USDA as-is. No allergen or vegan classification is asserted in this builder; apply the simulator's heuristic classifier downstream and preserve `unknown` when the data is insufficient.
+- If a department has too few qualifying USDA products, the builder uses qualifying products from other departments rather than inventing USDA catalog entries. It fails if it cannot reach the total size.
 
-`Take(n)` returns up to n scheduled items in service order; it returns fewer only after the queued work is exhausted. It returns a nonnil empty slice for n=0, no queues, or no available work; negative n panics. `Take(0)` does not change scheduling state. The result is not preallocated from n, and its slice storage does not alias internal queues. Internal visits may process several items and cross multiple queue rounds in one call. A retrieval limit never ends a visit or caps a queue's fairness share.
+## Test
 
-Costs and quanta are limited to `MaxCost` and `MaxQuantum`, both `uint64(1<<63 - 1)`. `Enqueue` returns `ErrCostTooLarge` for a larger cost and validates the whole batch before changing the queue. `SetQuantum` checks the queue index first, then returns `ErrZeroQuantum` for zero or `ErrQuantumTooLarge` above the limit, without changing state. Deficits use exact `uint64` arithmetic: credit is below 2⁶³ outside an active visit, a grant adds at most `MaxQuantum`, and fast-forward keeps credit below the head cost. Pausing never grants credit. Once a complete cycle produces no item, the scheduler uses exact division to skip only whole unproductive cycles, crediting every nonempty queue equally before resuming visits in order.
+```sh
+python3 -m unittest discover -s . -p 'test_*.py' -v
+```
 
-## Queue operations and mutation semantics
+The offline tests create a small USDA-shaped ZIP, exercise GTIN validation, archive reading, repeatability, optional nutrition, nested selections, and synthetic-vs-real identifier separation. An additional 45,000-row synthetic fixture was used to verify all three production target sizes; **the full official USDA 2026 download has not been run in this environment**.
 
-All methods synchronize scheduler state; do not copy a `DWRR` after first use. `Take` selects and removes work; the caller owns downstream execution and its concurrency.
+## Notes
 
-- `Enqueue` appends FIFO items. Appending to the active queue joins that same visit at its tail without another quantum.
-- `SetQuantum` keeps leftover credit and any active visit. A reweight takes effect at the next visit's quantum grant, not when a paused visit resumes; an unchanged quantum is a true no-op. Credit carried from a completed visit is less than the head cost at that time, so this transition effect is bounded and brief. A paused visit keeps the credit it already received.
-- `Take` selects and removes items in service order. `RemoveHead` directly removes the FIFO head without scheduling it, returning an item and `true` or the zero item and `false` when empty. If items remain, it preserves deficit and the active visit; emptying the queue resets deficit and cancels its active visit. `DrainQueue` directly removes all items, resets deficit, and cancels its active visit. Emptying via `Take` or `RemoveHead` retains the queue's remaining storage for reuse; `DrainQueue` and removing the queue release that storage.
-- `AddQueue` appends an empty queue at quantum 1 and returns its index. Existing indices and an active visit remain unchanged.
-- `RemoveQueue` drops the last queue and its contents; removing the active queue closes its visit. Other indices remain unchanged and the cursor stays valid. Removing from no queues is a no-op.
-
-Cost fairness is fairness over application-declared costs, not execution time, bytes, or wall-clock resource use. Synchronization protects scheduler state, not concurrent mutation of values stored in `T`.
+- This is a **product-catalog subset**, not a simulated 250-store retail chain. Its output can be fed to `synth-gen` to construct distributor and retailer SKU mappings, stores, inventories, and question sets.
+- The nonfood brands, names, and product IDs are fictional, not authoritative product assignments. If a real nonfood catalog becomes available, replace that portion without modifying USDA product identifiers.
+- The latest version of a particular UPC can be category-sensitive: a reclassification between department buckets may not be fully normalized. For high-integrity historical catalog studies, build an explicit global GTIN-version table first.
+- USDA dataset documentation: <https://fdc.nal.usda.gov/portal-data/external/dataDictionary>
