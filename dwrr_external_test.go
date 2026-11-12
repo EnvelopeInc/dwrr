@@ -3,8 +3,8 @@ package dwrr_test
 import (
 	"testing"
 
-	"github.com/EnvelopeInc/dwrr"
 	"github.com/stretchr/testify/require"
+	"github.com/version2beta/dwrr"
 )
 
 func TestPublicCostAwareAPI(t *testing.T) {

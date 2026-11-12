@@ -1,11 +1,11 @@
 # dwrr
 
-`github.com/EnvelopeInc/dwrr` is a generic cost-aware Deficit Weighted Round Robin scheduler for FIFO queues. Requires Go 1.22.2 or newer.
+`github.com/version2beta/dwrr` is a generic cost-aware Deficit Weighted Round Robin scheduler for FIFO queues. Requires Go 1.22.2 or newer.
 
 ## Install
 
 ```sh
-go get github.com/EnvelopeInc/dwrr@v0.10.0
+go get github.com/version2beta/dwrr@v0.10.1
 ```
 
 ## Example
@@ -16,7 +16,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/EnvelopeInc/dwrr"
+	"github.com/version2beta/dwrr"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/EnvelopeInc/dwrr
+module github.com/version2beta/dwrr
 
 go 1.22.2
 
